@@ -1,0 +1,9 @@
+- hosts: web
+  gather_facts: no
+  tasks:
+    - command: "false"
+      when: inventory_hostname == 'w1'
+- hosts: db
+  gather_facts: no
+  tasks:
+    - debug: msg="play 2 runs after partial failure"

@@ -1,0 +1,16 @@
+PLAY [all] 
+TASK [debug] 
+ "msg": "serial w1 batch=w1"
+TASK [command] 
+PLAY [all] 
+TASK [debug] 
+ "msg": "serial w2 batch=w2,d1"
+ "msg": "serial d1 batch=w2,d1"
+TASK [command] 
+PLAY [web] 
+TASK [command] 
+NO MORE HOSTS LEFT 
+NO MORE HOSTS LEFT 
+d1 ok=2 changed=1 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0 
+w1 ok=2 changed=1 unreachable=0 failed=1 skipped=0 rescued=0 ignored=0 
+w2 ok=1 changed=0 unreachable=0 failed=0 skipped=2 rescued=0 ignored=0 

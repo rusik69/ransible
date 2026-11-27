@@ -68,6 +68,8 @@ pub struct Runner {
     pub all_stats: std::sync::Mutex<Vec<(String, Stats)>>,
     pub started: std::sync::atomic::AtomicBool,
     pub play_no: std::sync::atomic::AtomicUsize,
+    /// set when a play ended with every host failed: later plays do not run (as in Ansible)
+    pub abort: std::sync::atomic::AtomicBool,
 }
 
 impl PlayState<'_> {
@@ -91,6 +93,7 @@ struct PlayState<'p> {
     play_hosts: Value,
     /// roles (name|params) already run in this play, for dependency de-duplication
     role_seen: HashSet<String>,
+    no_hosts_shown: bool,
 }
 
 struct TaskEnv<'a> {

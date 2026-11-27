@@ -1,0 +1,19 @@
+- hosts: all
+  gather_facts: no
+  serial: [1, 2]
+  tasks:
+    - debug: msg="serial {{ inventory_hostname }} batch={{ ansible_play_batch | join(',') }}"
+    - command: echo x
+      when: inventory_hostname != 'w2'
+- hosts: web
+  gather_facts: no
+  max_fail_percentage: 30
+  tasks:
+    - command: "false"
+      when: inventory_hostname == 'w1'
+    - debug: msg="after partial fail {{ inventory_hostname }}"
+- hosts: db
+  gather_facts: no
+  any_errors_fatal: true
+  tasks:
+    - debug: msg="db play {{ inventory_hostname }}"

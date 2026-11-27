@@ -559,3 +559,51 @@ fn compat_inventory_list_and_graph_match_ansible() {
         );
     }
 }
+
+#[test]
+fn compat_serial_failure_semantics_match_ansible() {
+    // serial batches, max_fail_percentage, all-hosts-failed aborting later plays, partial failures
+    for p in ["p8", "p9", "p10"] {
+        let (stdout, _code) = run(
+            &[
+                "playbook",
+                &format!("tests/fixtures/compat/{p}.yml"),
+                "-i",
+                "tests/fixtures/compat/inv.ini",
+            ],
+            "/tmp/ransible-it-flow",
+        );
+        let norm = |s: &str| -> Vec<String> {
+            s.lines()
+                .filter(|l| {
+                    (l.starts_with("PLAY [")
+                        || l.starts_with("TASK")
+                        || l.starts_with("RUNNING")
+                        || l.starts_with("NO MORE")
+                        || l.contains("\"msg\": \"")
+                        || l.starts_with("w1 ")
+                        || l.starts_with("w2 ")
+                        || l.starts_with("d1 "))
+                        && !l.contains("RECAP")
+                        && !l.contains("fatal")
+                        && !(l.contains("\"msg\": \"")
+                            && !l.contains("\"msg\": \"serial")
+                            && !l.contains("\"msg\": \"after")
+                            && !l.contains("\"msg\": \"db")
+                            && !l.contains("\"msg\": \"play"))
+                })
+                .map(|l| {
+                    l.trim_end_matches('*')
+                        .trim_end()
+                        .replace(" : ok=", " ok=")
+                        .split(' ')
+                        .filter(|x| !x.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        };
+        let want = std::fs::read_to_string(format!("tests/fixtures/compat/{p}.expected")).unwrap();
+        assert_eq!(norm(&stdout), norm(&want), "{p} differs from real Ansible");
+    }
+}

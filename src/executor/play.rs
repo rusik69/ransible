@@ -243,7 +243,8 @@ impl Runner {
         let groups = Value::Object(groups);
         let names_json: Value = Value::Array(names.iter().cloned().map(Value::from).collect());
         // {"all": every host of the play, "active": hosts still running (not failed/ended)}
-        let play_hosts = json!({"all": names_json.clone(), "active": names_json});
+        let play_hosts =
+            json!({"all": names_json.clone(), "active": names_json.clone(), "batch": names_json});
         let mut hosts = vec![];
         let overlay0 = Map::new();
         for n in &names {
@@ -306,6 +307,7 @@ impl Runner {
             groups,
             play_hosts,
             role_seen: seen,
+            no_hosts_shown: false,
         };
         // serial batches
         let total = ps.hosts.len();
@@ -333,7 +335,17 @@ impl Runner {
             si += 1;
         }
         let ov = Map::new();
-        for batch in &batches {
+        for (bi, batch) in batches.iter().enumerate() {
+            if bi > 0 {
+                // each serial batch gets its own PLAY banner
+                self.banner("PLAY", &play.name);
+            }
+            ps.play_hosts["batch"] = Value::Array(
+                batch
+                    .iter()
+                    .map(|&i| Value::from(ps.hosts[i].name.clone()))
+                    .collect(),
+            );
             if play.strategy_free && batch.len() > 1 {
                 // free strategy: every host runs the whole play independently, at its own pace
                 let results: Vec<(usize, Host, Result<()>)> = std::thread::scope(|s| {
@@ -355,6 +367,7 @@ impl Runner {
                                     groups,
                                     play_hosts,
                                     role_seen: HashSet::new(),
+                                    no_hosts_shown: false,
                                 };
                                 let r = self.run_batch(&mut mini, &[0], role_tasks, ov);
                                 (i, mini.hosts.pop().unwrap(), r)
@@ -375,6 +388,17 @@ impl Runner {
             }
         }
         let mut ok = true;
+        if !ps.hosts.is_empty() && ps.hosts.iter().all(|h| h.failed) {
+            // every host failed: the rest of the playbook is not run
+            self.abort.store(true, std::sync::atomic::Ordering::Relaxed);
+            if ps.no_hosts_shown {
+                self.emit(Event::Banner {
+                    kind: "NO MORE HOSTS LEFT".into(),
+                    name: String::new(),
+                    role: None,
+                });
+            }
+        }
         let mut st = self.all_stats.lock().unwrap();
         for h in &ps.hosts {
             if h.failed || h.stats.failed > 0 || h.stats.unreachable > 0 {
@@ -400,7 +424,10 @@ impl Runner {
         let st = self.all_stats.lock().unwrap();
         let mut code = 0;
         let mut stats = vec![];
-        for (n, s) in st.iter() {
+        // Ansible lists hosts alphabetically
+        let mut sorted: Vec<&(String, Stats)> = st.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        for (n, s) in sorted {
             stats.push(HostStat {
                 host: n.clone(),
                 ok: s.ok,

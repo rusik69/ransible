@@ -107,7 +107,7 @@ impl Runner {
         );
         v.insert("ansible_play_hosts".into(), active.clone());
         v.insert("ansible_play_hosts_all".into(), all);
-        v.insert("ansible_play_batch".into(), active.clone());
+        v.insert("ansible_play_batch".into(), env.play_hosts["batch"].clone());
         v.insert("play_hosts".into(), active);
         v.insert("omit".into(), crate::modules::OMIT.into());
         v.insert(

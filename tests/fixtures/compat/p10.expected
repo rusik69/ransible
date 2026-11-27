@@ -1,0 +1,8 @@
+PLAY [web] 
+TASK [command] 
+PLAY [db] 
+TASK [debug] 
+ "msg": "play 2 runs after partial failure"
+d1 ok=1 changed=0 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0 
+w1 ok=0 changed=0 unreachable=0 failed=1 skipped=0 rescued=0 ignored=0 
+w2 ok=0 changed=0 unreachable=0 failed=0 skipped=1 rescued=0 ignored=0 

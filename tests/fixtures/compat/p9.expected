@@ -1,0 +1,4 @@
+PLAY [web] 
+TASK [command] 
+w1 ok=0 changed=0 unreachable=0 failed=1 skipped=0 rescued=0 ignored=0 
+w2 ok=0 changed=0 unreachable=0 failed=1 skipped=0 rescued=0 ignored=0 

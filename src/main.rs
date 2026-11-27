@@ -424,6 +424,7 @@ fn build_runner(c: &Common, dir: &Path) -> Result<executor::Runner> {
         all_stats: Default::default(),
         started: std::sync::atomic::AtomicBool::new(false),
         play_no: std::sync::atomic::AtomicUsize::new(0),
+        abort: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -716,6 +717,9 @@ fn run() -> Result<i32> {
             });
             let mut ok = true;
             for play in &plays {
+                if runner.abort.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 if !runner.run_play(play)? {
                     ok = false;
                     // Ansible stops once all hosts in a play failed; continue for remaining hosts

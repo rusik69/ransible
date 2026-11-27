@@ -22,6 +22,14 @@ impl Runner {
         for t in tasks {
             let act = self.active(ps, idxs);
             if act.is_empty() {
+                if !ps.hosts.is_empty() && ps.hosts.iter().all(|h| h.failed) && !ps.no_hosts_shown {
+                    ps.no_hosts_shown = true;
+                    self.emit(Event::Banner {
+                        kind: "NO MORE HOSTS LEFT".into(),
+                        name: String::new(),
+                        role: None,
+                    });
+                }
                 break;
             }
             if t.is_block {
