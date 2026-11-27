@@ -1,0 +1,42 @@
+- hosts: w1
+  gather_facts: no
+  vars: {d: /tmp/ransible-compat-p14}
+  tasks:
+    - file: {path: "{{ d }}", state: absent}
+    - file: {path: "{{ d }}/t/sub/deep", state: directory}
+    - copy: {dest: "{{ d }}/t/a.txt", content: "alpha\n"}
+    - copy: {dest: "{{ d }}/t/b.log", content: "beta beta\n"}
+    - copy: {dest: "{{ d }}/t/sub/c.txt", content: "gamma\n"}
+    - copy: {dest: "{{ d }}/l.txt", content: "one\ntwo\nthree\ntwo\n"}
+    - lineinfile: {path: "{{ d }}/l.txt", regexp: '^two', line: 'TWO', firstmatch: yes}
+      register: l1
+    - lineinfile: {path: "{{ d }}/l.txt", line: 'tail', insertafter: EOF, backup: yes}
+      register: l2
+    - lineinfile: {path: "{{ d }}/l.txt", line: 'x', validate: "false %s"}
+      register: l3
+      ignore_errors: yes
+    - lineinfile: {path: "{{ d }}/nonew.txt", line: 'x', create: yes}
+      register: l4
+    - blockinfile: {path: "{{ d }}/l.txt", block: "b1\nb2", marker: "# {mark} MINE", marker_begin: START, marker_end: STOP}
+      register: l5
+    - blockinfile: {path: "{{ d }}/l.txt", block: "b1\nb2", marker: "# {mark} MINE", marker_begin: START, marker_end: STOP}
+      register: l6
+    - stat: {path: "{{ d }}/l.txt", get_mime: yes, checksum_algorithm: md5}
+      register: s1
+    - stat: {path: "{{ d }}/nothere"}
+      register: s2
+    - find: {paths: "{{ d }}/t", patterns: ['*.txt'], recurse: yes}
+      register: f1
+    - find: {paths: "{{ d }}/t", patterns: ['.*\.log$'], use_regex: yes}
+      register: f2
+    - find: {paths: "{{ d }}/t", file_type: directory, recurse: yes}
+      register: f3
+    - find: {paths: "{{ d }}/t", size: 6, recurse: yes, excludes: ['c*']}
+      register: f4
+    - find: {paths: "{{ d }}/t", file_type: any, depth: 1}
+      register: f5
+    - debug:
+        msg: "{{ [l1.changed, l1.msg, l2.changed, l2.msg, l2.backup_file is defined, l3.failed|default(false), l3.msg|default(''), l4.changed, l4.msg, l5.changed, l5.msg, l6.changed, l6.msg, s1.stat.exists, s1.stat.checksum, s1.stat.mimetype|default('-'), s1.stat.isreg, s2.stat.exists, s2.stat|length, f1.matched, f1.files|map(attribute='path')|map('basename')|sort|list, f1.examined, f2.matched, f3.matched, f4.matched, f5.matched, f1.msg|default(''), f1.skipped_paths|default('-')] | to_json }}"
+    - shell: cat {{ d }}/l.txt
+      register: cat
+    - debug: var=cat.stdout_lines

@@ -425,7 +425,7 @@ fn compat_file_module_results_match_ansible() {
 
 #[test]
 fn compat_text_edit_modules_match_ansible() {
-    for n in ["p11", "p12", "p13"] {
+    for n in ["p11", "p12", "p13", "p14"] {
         let dir = format!("/tmp/ransible-compat-{n}");
         let _ = std::fs::remove_dir_all(&dir);
         let (stdout, code) = run(

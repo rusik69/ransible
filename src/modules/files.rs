@@ -133,7 +133,12 @@ pub(crate) fn diff_entry(old: Option<&str>, new: &str, path: &str, with_label: b
 
 /// Write content to dest if different. Returns result.
 /// Run the `validate` command (with %s = temp file) before installing content.
-pub(super) fn validate_content(a: &Args, ctx: &Ctx, data: &[u8]) -> Result<Option<Res>> {
+pub(super) fn validate_content(
+    a: &Args,
+    ctx: &Ctx,
+    data: &[u8],
+    legacy: bool,
+) -> Result<Option<Res>> {
     let Some(v) = st(a, "validate") else {
         return Ok(None);
     };
@@ -150,6 +155,14 @@ pub(super) fn validate_content(a: &Args, ctx: &Ctx, data: &[u8]) -> Result<Optio
     let o = ctx.conn.exec(&v.replace("%s", &q(&tmp)))?;
     let _ = ctx.conn.exec(&format!("rm -f {}", q(&tmp)));
     if o.rc != 0 {
+        if legacy {
+            // lineinfile/blockinfile/replace: Ansible's `fail_json(msg="failed to validate: rc:%s error:%s")`
+            return Ok(Some(fail(format!(
+                "failed to validate: rc:{} error:{}",
+                o.rc,
+                o.stderr.trim()
+            ))));
+        }
         let mut r = fail("failed to validate");
         r.insert("exit_status".into(), o.rc.into());
         r.insert("stdout".into(), o.stdout.clone().into());
@@ -249,7 +262,7 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
                     o.stderr.trim()
                 );
             }
-            if let Some(mut f) = validate_content(a, ctx, data)? {
+            if let Some(mut f) = validate_content(a, ctx, data, false)? {
                 use sha1::Digest;
                 f.insert(
                     "checksum".into(),
@@ -565,6 +578,12 @@ pub(crate) fn read_text(ctx: &Ctx, path: &str, create: bool) -> Result<Option<St
     }
 }
 
+/// Marks a result as coming from lineinfile/blockinfile (they report `backup`, not `backup_file`).
+fn lb(mut r: Res) -> Res {
+    r.insert("__lb".into(), true.into());
+    r
+}
+
 pub(crate) fn write_text(
     a: &Args,
     ctx: &Ctx,
@@ -580,17 +599,23 @@ pub(crate) fn write_text(
         }
         if !ctx.check {
             ctx.conn.exec(&format!("mkdir -p {}", q(&dir_of(path))))?;
-            if let Some(f) = validate_content(a, ctx, new.as_bytes())? {
+            if let Some(f) = validate_content(a, ctx, new.as_bytes(), true)? {
                 return Ok(f);
             }
             if old.is_some()
                 && let Some(b) = make_backup(a, ctx, path)?
             {
-                r.insert("backup_file".into(), b.into());
+                let key = if r.contains_key("__lb") {
+                    "backup"
+                } else {
+                    "backup_file"
+                };
+                r.insert(key.into(), b.into());
             }
             ctx.conn.put(path, new.as_bytes(), None)?;
         }
     }
+    r.remove("__lb");
     let ac = apply_attrs(a, ctx, path)?;
     r.insert("changed".into(), (changed || ac).into());
     if !ctx.check || old.is_some() {
@@ -686,7 +711,7 @@ pub(super) fn lineinfile(a: &Args, ctx: &Ctx) -> Result<Res> {
     }
     let mut r = res(false);
     r.insert("msg".into(), msg.into());
-    write_text(a, ctx, &path, old.as_deref(), &new, r)
+    write_text(a, ctx, &path, old.as_deref(), &new, lb(r))
 }
 
 pub(super) fn blockinfile(a: &Args, ctx: &Ctx) -> Result<Res> {
@@ -738,7 +763,7 @@ pub(super) fn blockinfile(a: &Args, ctx: &Ctx) -> Result<Res> {
         "Block inserted"
     };
     r0.insert("msg".into(), msg.into());
-    write_text(a, ctx, &path, old.as_deref(), &new, r0)
+    write_text(a, ctx, &path, old.as_deref(), &new, lb(r0))
 }
 
 pub(super) fn replace(a: &Args, ctx: &Ctx) -> Result<Res> {
@@ -846,8 +871,21 @@ else echo exists=0; fi"#,
         }
     }
     if s.get("exists") != Some(&Value::Bool(true)) {
+        s.clear();
         s.insert("exists".into(), false.into());
     } else {
+        if bo(a, "get_mime", true) {
+            let m = ctx
+                .conn
+                .exec(&format!("file -L --mime-type -b {p} 2>/dev/null"))?;
+            let enc = ctx
+                .conn
+                .exec(&format!("file -L --mime-encoding -b {p} 2>/dev/null"))?;
+            if m.rc == 0 && !m.stdout.trim().is_empty() {
+                s.insert("mimetype".into(), m.stdout.trim().into());
+                s.insert("charset".into(), enc.stdout.trim().into());
+            }
+        }
         s.insert("path".into(), path.clone().into());
         s.insert("isblk".into(), false.into());
         s.insert("ischr".into(), false.into());
@@ -936,8 +974,16 @@ pub(super) fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
     } else {
         ""
     };
-    let strip = st(a, "extra_opts").unwrap_or_default();
-    ctx.conn.exec(&format!("mkdir -p {}", q(&dest)))?;
+    let mut opts: Vec<String> = list(a, "extra_opts").iter().map(|o| q(o)).collect();
+    opts.extend(
+        list(a, "exclude")
+            .iter()
+            .map(|e| q(&format!("--exclude={e}"))),
+    );
+    let strip = opts.join(" ");
+    if ctx.conn.exec(&format!("test -d {}", q(&dest)))?.rc != 0 {
+        return Ok(fail(format!("dest '{dest}' must be an existing dir")));
+    }
     let (data, path);
     let is_url =
         src.starts_with("http://") || src.starts_with("https://") || src.starts_with("ftp://");
@@ -971,6 +1017,36 @@ pub(super) fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
         data = Some(std::fs::read(&p)?);
         path = String::new();
     }
+    // GNU tar: `--diff` against the destination tells whether extraction would change anything
+    let gnu =
+        !src.ends_with(".zip") && ctx.conn.exec("tar --version 2>/dev/null | grep -q GNU")?.rc == 0;
+    let mut files: Option<Vec<String>> = None;
+    if gnu && (remote || is_url) {
+        if bo(a, "list_files", false) {
+            let l = ctx
+                .conn
+                .exec(&format!("tar -t{flag}f {} {strip}", q(&path)))?;
+            files = Some(l.stdout.lines().map(String::from).collect());
+        }
+        let d = ctx.conn.exec(&format!(
+            "tar --diff -{flag}f {} -C {} {strip} 2>&1 | head -1",
+            q(&path),
+            q(&dest)
+        ))?;
+        if d.stdout.trim().is_empty() {
+            if let Some(t) = downloaded {
+                let _ = ctx.conn.exec(&format!("rm -f {}", q(&t)));
+            }
+            let mut r = res(false);
+            r.insert("dest".into(), dest.clone().into());
+            r.insert("src".into(), src.clone().into());
+            r.insert("handler".into(), "TgzArchive".into());
+            if let Some(f) = files {
+                r.insert("files".into(), f.into());
+            }
+            return Ok(r);
+        }
+    }
     let cmd = if src.ends_with(".zip") {
         if remote {
             format!("unzip -o -q {} -d {}", q(&path), q(&dest))
@@ -997,8 +1073,11 @@ pub(super) fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
     }
     let mut r = res(true);
     r.insert("dest".into(), dest.clone().into());
-    let ac = apply_attrs(a, ctx, &dest)?;
-    let _ = ac;
+    r.insert("src".into(), src.clone().into());
+    if let Some(f) = files {
+        r.insert("files".into(), f.into());
+    }
+    let _ = apply_attrs(a, ctx, &dest)?;
     Ok(r)
 }
 
@@ -1026,19 +1105,60 @@ pub(super) fn find(a: &Args, ctx: &Ctx) -> Result<Res> {
     let patterns = list(a, "patterns");
     let ftype = st(a, "file_type").unwrap_or_else(|| "file".into());
     let use_regex = bo(a, "use_regex", false);
+    let depth = a.get("depth").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    });
+    let mut skipped = Map::new();
     let mut cmd = String::new();
+    let mut all_cmd = String::new();
     for p in &paths {
-        let mut c = format!("find {}", q(p));
-        if !bo(a, "recurse", false) {
-            c += " -maxdepth 1 -mindepth 1";
-        } else {
-            c += " -mindepth 1";
+        if ctx.conn.exec(&format!("test -d {}", q(p)))?.rc != 0 {
+            skipped.insert(
+                p.clone(),
+                format!("Skipped '{p}' path due to this access issue: '{p}' is not a directory")
+                    .into(),
+            );
+            continue;
         }
+        let mut base = format!("find {} -mindepth 1", q(p));
+        match (depth, bo(a, "recurse", false)) {
+            (Some(d), _) => base += &format!(" -maxdepth {d}"),
+            (None, false) => base += " -maxdepth 1",
+            _ => {}
+        }
+        all_cmd += &format!("{base} -print0 2>/dev/null; ");
+        let mut c = base;
         match ftype.as_str() {
             "file" => c += " -type f",
             "directory" => c += " -type d",
             "link" => c += " -type l",
             _ => {}
+        }
+        if let Some(sz) = st(a, "size") {
+            let sz = sz.trim().to_lowercase();
+            let (sign, rest) = match sz.strip_prefix('-') {
+                Some(r) => ('-', r.to_string()),
+                None => ('+', sz.trim_start_matches('+').to_string()),
+            };
+            let (num, unit) = rest.split_at(
+                rest.find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len()),
+            );
+            let mult: i64 = match unit {
+                "k" | "kb" => 1024,
+                "m" | "mb" => 1024 * 1024,
+                "g" | "gb" => 1024 * 1024 * 1024,
+                "t" | "tb" => 1024_i64.pow(4),
+                _ => 1,
+            };
+            let n = num.parse::<i64>().unwrap_or(0) * mult;
+            c += " -type f";
+            c += &if sign == '+' {
+                format!(" -size +{}c", (n - 1).max(0))
+            } else {
+                format!(" -size -{}c", n + 1)
+            };
         }
         if let Some(age) = st(a, "age") {
             let (neg, rest) = if let Some(r) = age.strip_prefix('-') {
@@ -1067,7 +1187,21 @@ pub(super) fn find(a: &Args, ctx: &Ctx) -> Result<Res> {
         c += " -print0";
         cmd += &format!("{c} 2>/dev/null; ");
     }
-    let o = ctx.conn.exec(&cmd)?;
+    let o = if cmd.is_empty() {
+        Default::default()
+    } else {
+        ctx.conn.exec(&cmd)?
+    };
+    let examined = if all_cmd.is_empty() {
+        0
+    } else {
+        ctx.conn
+            .exec(&all_cmd)?
+            .stdout
+            .split('\0')
+            .filter(|x| !x.is_empty())
+            .count()
+    };
     let re_list: Vec<regex::Regex> = patterns
         .iter()
         .filter_map(|p| {
@@ -1094,9 +1228,7 @@ pub(super) fn find(a: &Args, ctx: &Ctx) -> Result<Res> {
         .collect();
     let hidden = bo(a, "hidden", false);
     let mut files = vec![];
-    let mut examined = 0;
     for p in o.stdout.split('\0').filter(|x| !x.is_empty()) {
-        examined += 1;
         let base = p.rsplit('/').next().unwrap_or(p);
         if !hidden && base.starts_with('.') {
             continue;
@@ -1129,5 +1261,15 @@ pub(super) fn find(a: &Args, ctx: &Ctx) -> Result<Res> {
     r.insert("matched".into(), files.len().into());
     r.insert("examined".into(), examined.into());
     r.insert("files".into(), Value::Array(files));
+    r.insert(
+        "msg".into(),
+        (if skipped.is_empty() {
+            "All paths examined"
+        } else {
+            "Not all paths examined, check warnings for details"
+        })
+        .into(),
+    );
+    r.insert("skipped_paths".into(), Value::Object(skipped));
     Ok(r)
 }

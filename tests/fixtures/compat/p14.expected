@@ -1,0 +1,96 @@
+
+PLAY [w1] **********************************************************************
+
+TASK [file] ********************************************************************
+[WARNING]: Host 'w1' is using the discovered Python interpreter at '/opt/homebrew/bin/python3.14', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.21/reference_appendices/interpreter_discovery.html for more information.
+ok: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+[ERROR]: Task failed: Module failed: failed to validate: rc:1 error:
+Origin: /Users/rusik/go/src/github.com/rusik69/rancible/tests/fixtures/compat/p14.yml:15:7
+
+13     - lineinfile: {path: "{{ d }}/l.txt", line: 'tail', insertafter: EOF, backup: yes}
+14       register: l2
+15     - lineinfile: {path: "{{ d }}/l.txt", line: 'x', validate: "false %s"}
+         ^ column 7
+
+fatal: [w1]: FAILED! => {"changed": false, "msg": "failed to validate: rc:1 error:"}
+...ignoring
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [blockinfile] *************************************************************
+changed: [w1]
+
+TASK [blockinfile] *************************************************************
+ok: [w1]
+
+TASK [stat] ********************************************************************
+ok: [w1]
+
+TASK [stat] ********************************************************************
+ok: [w1]
+
+TASK [find] ********************************************************************
+ok: [w1]
+
+TASK [find] ********************************************************************
+ok: [w1]
+
+TASK [find] ********************************************************************
+ok: [w1]
+
+TASK [find] ********************************************************************
+ok: [w1]
+
+TASK [find] ********************************************************************
+ok: [w1]
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "msg": "[true, \"line replaced\", true, \"line added\", false, true, \"failed to validate: rc:1 error:\", true, \"line added\", true, \"Block inserted\", false, \"\", true, \"092d76486c3866fc0b76dc4966fd4139\", \"text/plain\", true, false, 1, 2, [\"a.txt\", \"c.txt\"], 5, 1, 2, 2, 3, \"All paths examined\", {}]"
+}
+
+TASK [shell] *******************************************************************
+changed: [w1]
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "cat.stdout_lines": [
+        "one",
+        "TWO",
+        "three",
+        "two",
+        "tail",
+        "# START MINE",
+        "b1",
+        "b2",
+        "# STOP MINE"
+    ]
+}
+
+PLAY RECAP *********************************************************************
+w1                         : ok=22   changed=10   unreachable=0    failed=0    skipped=0    rescued=0    ignored=1   
+
