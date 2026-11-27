@@ -1,0 +1,78 @@
+- hosts: all
+  gather_facts: no
+  handlers:
+    - name: h-one
+      debug: msg="h-one on {{ inventory_hostname }}"
+      listen: topic
+    - name: h-two
+      debug: msg="h-two on {{ inventory_hostname }}"
+      listen: topic
+    - name: h-plain
+      debug: msg="plain on {{ inventory_hostname }}"
+  tasks:
+    - name: block flow
+      block:
+        - debug: msg="block start {{ inventory_hostname }}"
+        - command: "false"
+          when: inventory_hostname == 'w1'
+        - debug: msg="not reached on w1"
+      rescue:
+        - debug: msg="rescue {{ inventory_hostname }} {{ ansible_failed_task.name | default('?') }}"
+      always:
+        - debug: msg="always {{ inventory_hostname }}"
+    - name: tags demo
+      debug: msg="tagged"
+      tags: [t1]
+    - name: notify chain
+      command: echo changed
+      notify: [topic, h-plain]
+      register: nc
+    - meta: flush_handlers
+    - name: after flush
+      debug: msg="after flush {{ nc.changed }}"
+    - name: failed_when list
+      command: echo out
+      register: fw
+      failed_when:
+        - fw.rc != 0
+        - "'bad' in fw.stdout"
+    - name: changed_when false
+      command: echo x
+      changed_when: false
+      register: cw
+    - debug: msg="{{ cw.changed }} {{ cw.stdout }} {{ cw.rc }} {{ cw.stdout_lines }} {{ cw.cmd }}"
+      run_once: true
+    - name: run_once and delegate
+      command: echo hello
+      register: ro
+      run_once: true
+      delegate_to: localhost
+    - debug: msg="{{ ro.stdout }} {{ ro.changed }}"
+    - name: check_mode per task
+      command: echo cm
+      check_mode: false
+      register: cm
+    - debug: msg="{{ cm.stdout }}"
+      run_once: true
+    - name: ignore errors and continue
+      command: "false"
+      ignore_errors: true
+      register: ie
+    - debug: msg="{{ ie.failed }} {{ ie.rc }} {{ ie is failed }} {{ ie is not succeeded }}"
+      run_once: true
+    - name: until retries
+      command: echo retry
+      register: ur
+      until: ur.stdout == 'retry'
+      retries: 2
+      delay: 0
+    - debug: msg="attempts={{ ur.attempts }}"
+      run_once: true
+    - name: end host for db
+      meta: end_host
+      when: inventory_hostname == 'd1'
+    - debug: msg="still running {{ inventory_hostname }}"
+    - name: vars precedence and magic
+      debug:
+        msg: "{{ inventory_hostname }} {{ group_names | sort }} {{ ansible_play_hosts | sort }} {{ inventory_hostname_short }} {{ playbook_dir is defined }} {{ ansible_check_mode }}"
+      run_once: true

@@ -6,6 +6,37 @@ use serde_json::{Map, Value};
 
 pub type Vars = Map<String, Value>;
 
+thread_local! {
+    /// Variables of the render in progress on this thread (for lookups that need them).
+    static CURRENT_VARS: std::cell::RefCell<Vec<*const Vars>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct VarsGuard;
+impl VarsGuard {
+    fn new(vars: &Vars) -> VarsGuard {
+        CURRENT_VARS.with(|c| c.borrow_mut().push(vars as *const Vars));
+        VarsGuard
+    }
+}
+impl Drop for VarsGuard {
+    fn drop(&mut self) {
+        CURRENT_VARS.with(|c| {
+            c.borrow_mut().pop();
+        });
+    }
+}
+
+/// Run `f` with the variables of the render in progress (empty map outside a render).
+fn with_vars<R>(f: impl FnOnce(&Vars) -> R) -> R {
+    let ptr = CURRENT_VARS.with(|c| c.borrow().last().copied());
+    match ptr {
+        // SAFETY: the pointer is pushed by VarsGuard for the duration of a synchronous render on
+        // this thread and popped when the guard drops, so it is valid whenever it is on the stack.
+        Some(p) => f(unsafe { &*p }),
+        None => f(&Vars::new()),
+    }
+}
+
 pub struct Templar {
     env: Environment<'static>,
 }
@@ -104,6 +135,23 @@ impl Templar {
     pub fn new() -> Self {
         let mut env = Environment::new();
         env.set_undefined_behavior(UndefinedBehavior::Chainable);
+        // `{% include %}` / `{% import %}` / `{% extends %}`: look in role/playbook templates dirs
+        env.set_loader(|name| {
+            Ok(with_vars(|vars| {
+                crate::lookup::find_file(vars, name, &["templates", "files"])
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    // included templates lose one trailing newline, as in Jinja2's default
+                    .map(|t| t.strip_suffix('\n').map(String::from).unwrap_or(t))
+            }))
+        });
+        // like Ansible, `none` renders as an empty string inside text templates
+        env.set_formatter(|out, state, value| {
+            if value.is_none() {
+                Ok(())
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
         env.set_syntax(
             minijinja::syntax::SyntaxConfig::builder()
                 .trim_blocks(true)
@@ -111,19 +159,42 @@ impl Templar {
                 .build()
                 .unwrap(),
         );
+        minijinja_contrib::add_to_environment(&mut env);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
 
-        env.add_filter("to_json", |v: MValue| {
-            serde_json::to_string(&to_json_val(&v)).unwrap_or_default()
+        env.add_filter("to_json", |v: MValue, kw: Kwargs| {
+            let ind: Option<usize> = kw.get("indent").ok();
+            crate::pyfmt::json_dumps(
+                &to_json_val(&v),
+                ind,
+                kw.get("sort_keys").unwrap_or(false),
+                kw.get("ensure_ascii").unwrap_or(true),
+            )
         });
-        env.add_filter("to_nice_json", |v: MValue| {
-            serde_json::to_string_pretty(&to_json_val(&v)).unwrap_or_default()
+        env.add_filter("to_nice_json", |v: MValue, kw: Kwargs| {
+            crate::pyfmt::json_dumps(
+                &to_json_val(&v),
+                Some(kw.get("indent").unwrap_or(4)),
+                kw.get("sort_keys").unwrap_or(true),
+                kw.get("ensure_ascii").unwrap_or(true),
+            )
         });
-        env.add_filter("to_yaml", |v: MValue| {
-            serde_yaml::to_string(&to_json_val(&v)).unwrap_or_default()
+        env.add_filter("to_yaml", |v: MValue, kw: Kwargs| {
+            // PyYAML default_flow_style=None: collections of scalars use flow style unless told otherwise
+            let flow_leaves = kw.get::<bool>("default_flow_style").is_err();
+            crate::pyfmt::yaml_dump_opts(
+                &to_json_val(&v),
+                kw.get("indent").unwrap_or(2),
+                kw.get("sort_keys").unwrap_or(true),
+                flow_leaves,
+            )
         });
-        env.add_filter("to_nice_yaml", |v: MValue| {
-            serde_yaml::to_string(&to_json_val(&v)).unwrap_or_default()
+        env.add_filter("to_nice_yaml", |v: MValue, kw: Kwargs| {
+            crate::pyfmt::yaml_dump(
+                &to_json_val(&v),
+                kw.get("indent").unwrap_or(4),
+                kw.get("sort_keys").unwrap_or(true),
+            )
         });
         env.add_filter("from_json", |s: String| -> Result<MValue, Error> {
             let v: Value = serde_json::from_str(&s).map_err(|e| err(e.to_string()))?;
@@ -586,6 +657,73 @@ impl Templar {
                 from_json_val(&cur)
             },
         );
+        env.add_filter("dictsort", |v: MValue, kw: Kwargs| {
+            let by_value: bool = kw
+                .get::<String>("by")
+                .map(|b| b == "value")
+                .unwrap_or(false);
+            let rev: bool = kw.get("reverse").unwrap_or(false);
+            let mut items: Vec<(String, Value)> = to_json_val(&v)
+                .as_object()
+                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            items.sort_by(|a, b| {
+                if by_value {
+                    a.1.to_string().cmp(&b.1.to_string())
+                } else {
+                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
+                }
+            });
+            if rev {
+                items.reverse();
+            }
+            from_json_val(&Value::Array(
+                items
+                    .into_iter()
+                    .map(|(k, v)| Value::Array(vec![Value::String(k), v]))
+                    .collect(),
+            ))
+        });
+        env.add_filter("wordwrap", |s: String, width: Option<usize>, kw: Kwargs| {
+            let width = width.or_else(|| kw.get("width").ok()).unwrap_or(79).max(1);
+            let wrapstring: String = kw.get("wrapstring").unwrap_or_else(|_| "\n".to_string());
+            let break_long: bool = kw.get("break_long_words").unwrap_or(true);
+            let mut out_lines: Vec<String> = vec![];
+            for para in s.split('\n') {
+                let mut line = String::new();
+                for word in para.split_whitespace() {
+                    let mut w = word.to_string();
+                    while break_long && w.chars().count() > width {
+                        if !line.is_empty() {
+                            out_lines.push(std::mem::take(&mut line));
+                        }
+                        let head: String = w.chars().take(width).collect();
+                        w = w.chars().skip(width).collect();
+                        out_lines.push(head);
+                    }
+                    if line.is_empty() {
+                        line = w;
+                    } else if line.chars().count() + 1 + w.chars().count() <= width {
+                        line.push(' ');
+                        line.push_str(&w);
+                    } else {
+                        out_lines.push(std::mem::replace(&mut line, w));
+                    }
+                }
+                out_lines.push(line);
+            }
+            out_lines.join(&wrapstring)
+        });
+        env.add_filter("center", |s: String, width: Option<usize>| {
+            let width = width.unwrap_or(80);
+            let len = s.chars().count();
+            if width <= len {
+                return s;
+            }
+            let pad = width - len;
+            let left = pad / 2 + (pad & width & 1);
+            format!("{}{}{}", " ".repeat(left), s, " ".repeat(pad - left))
+        });
         env.add_filter("split", |s: String, sep: Option<String>| -> Vec<String> {
             match sep {
                 Some(p) => s.split(p.as_str()).map(String::from).collect(),
@@ -660,6 +798,38 @@ impl Templar {
         env.add_test("directory", |s: String| std::path::Path::new(&s).is_dir());
 
         // functions
+        fn do_lookup(
+            state: &minijinja::State,
+            kind: &str,
+            args: &[MValue],
+            kw: &Kwargs,
+        ) -> Result<Vec<Value>, Error> {
+            let json_args: Vec<Value> = args.iter().map(to_json_val).collect();
+            let mut kwm = Map::new();
+            for k in kw.args() {
+                if let Ok(v) = kw.get::<MValue>(k) {
+                    kwm.insert(k.to_string(), to_json_val(&v));
+                }
+            }
+            with_vars(|vars| {
+                let render = |text: &str| {
+                    state
+                        .env()
+                        .render_str(text, MValue::from(minijinja::value::Serde(vars)))
+                        .map_err(|e| e.to_string())
+                };
+                crate::lookup::run(
+                    kind,
+                    &json_args,
+                    &kwm,
+                    &crate::lookup::Ctx {
+                        vars,
+                        render: &render,
+                    },
+                )
+                .map_err(err)
+            })
+        }
         env.add_function(
             "lookup",
             |state: &minijinja::State,
@@ -667,105 +837,33 @@ impl Templar {
              args: minijinja::value::Rest<MValue>,
              kw: Kwargs|
              -> Result<MValue, Error> {
-                let a = args.first().map(|x| x.to_string()).unwrap_or_default();
-                let r = match kind.as_str() {
-                    "first_found" => {
-                        let arg = args.first().map(to_json_val).unwrap_or(Value::Null);
-                        let dir = |k: &str| {
-                            state
-                                .lookup(k)
-                                .map(|v| v.to_string())
-                                .filter(|s| s != "none" && !s.is_empty())
-                        };
-                        let mut dirs: Vec<String> = vec![];
-                        let (files, paths): (Vec<Value>, Vec<Value>) = match &arg {
-                            Value::Object(o) => (
-                                o.get("files")
-                                    .map(|f| match f {
-                                        Value::Array(a) => a.clone(),
-                                        x => vec![x.clone()],
-                                    })
-                                    .unwrap_or_default(),
-                                o.get("paths")
-                                    .map(|f| match f {
-                                        Value::Array(a) => a.clone(),
-                                        x => vec![x.clone()],
-                                    })
-                                    .unwrap_or_default(),
-                            ),
-                            Value::Array(a) => (a.clone(), vec![]),
-                            x => (vec![x.clone()], vec![]),
-                        };
-                        let rp = dir("role_path");
-                        let pd = dir("playbook_dir");
-                        for p in &paths {
-                            let p = p.as_str().unwrap_or("");
-                            if p.starts_with('/') {
-                                dirs.push(p.to_string());
-                            } else {
-                                for b in [&rp, &pd].into_iter().flatten() {
-                                    dirs.push(format!("{b}/{p}"));
-                                }
-                            }
-                        }
-                        for b in [&rp, &pd].into_iter().flatten() {
-                            for sub in ["", "vars", "tasks", "files", "templates", "defaults"] {
-                                dirs.push(if sub.is_empty() {
-                                    b.clone()
-                                } else {
-                                    format!("{b}/{sub}")
-                                });
-                            }
-                        }
-                        let mut found = None;
-                        'o: for f in &files {
-                            let f = f.as_str().unwrap_or("");
-                            if f.starts_with('/') && std::path::Path::new(f).exists() {
-                                found = Some(f.to_string());
-                                break;
-                            }
-                            for d in &dirs {
-                                let c = format!("{d}/{f}");
-                                if std::path::Path::new(&c).is_file() {
-                                    found = Some(c);
-                                    break 'o;
-                                }
-                            }
-                        }
-                        match found {
-                            Some(f) => f,
-                            None if kw.get::<bool>("skip").unwrap_or(false) => String::new(),
-                            None => return Err(err("No file was found when using first_found")),
-                        }
-                    }
-                    "env" => std::env::var(&a).unwrap_or_default(),
-                    "file" => std::fs::read_to_string(&a)
-                        .map_err(|e| err(format!("lookup file {a}: {e}")))?,
-                    "pipe" => {
-                        let o = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&a)
-                            .output()
-                            .map_err(|e| err(e.to_string()))?;
-                        String::from_utf8_lossy(&o.stdout).trim_end().to_string()
-                    }
-                    other => return Err(err(format!("unsupported lookup plugin '{other}'"))),
-                };
-                let _ = kw.assert_all_used();
-                Ok(MValue::from(r))
+                let wantlist: bool = kw.get("wantlist").unwrap_or(false);
+                let terms = do_lookup(state, &kind, &args, &kw)?;
+                Ok(from_json_val(&crate::lookup::lookup_value(terms, wantlist)))
             },
         );
         env.add_function(
             "query",
-            |kind: String, args: minijinja::value::Rest<MValue>| -> Result<MValue, Error> {
-                let a = args.first().map(|x| x.to_string()).unwrap_or_default();
-                match kind.as_str() {
-                    "env" => Ok(MValue::from(vec![std::env::var(&a).unwrap_or_default()])),
-                    "file" => Ok(MValue::from(vec![
-                        std::fs::read_to_string(&a).map_err(|e| err(e.to_string()))?,
-                    ])),
-                    other => Err(err(format!("unsupported lookup plugin '{other}'"))),
-                }
+            |state: &minijinja::State,
+             kind: String,
+             args: minijinja::value::Rest<MValue>,
+             kw: Kwargs|
+             -> Result<MValue, Error> {
+                Ok(from_json_val(&Value::Array(do_lookup(
+                    state, &kind, &args, &kw,
+                )?)))
+            },
+        );
+        env.add_function(
+            "q",
+            |state: &minijinja::State,
+             kind: String,
+             args: minijinja::value::Rest<MValue>,
+             kw: Kwargs|
+             -> Result<MValue, Error> {
+                Ok(from_json_val(&Value::Array(do_lookup(
+                    state, &kind, &args, &kw,
+                )?)))
             },
         );
         env.add_function("now", || {
@@ -812,12 +910,16 @@ impl Templar {
         }
         let norm = Self::normalize(s);
         let s: &str = &norm;
+        let _guard = VarsGuard::new(vars);
         let t = s;
-        if t.starts_with("{{")
-            && t.ends_with("}}")
-            && t.matches("{{").count() == 1
-            && t.matches("}}").count() == 1
-        {
+        // a string that is exactly one `{{ expr }}` keeps the expression's native type
+        let single = t.starts_with("{{") && t.ends_with("}}") && t.matches("{{").count() == 1 && {
+            let inner = t[2..t.len() - 2]
+                .trim_start_matches('-')
+                .trim_end_matches('-');
+            !inner.contains("}}") || self.env.compile_expression(inner).is_ok()
+        };
+        if single {
             let inner = &t[2..t.len() - 2];
             let inner = inner.trim_start_matches('-').trim_end_matches('-');
             let e = self
@@ -852,6 +954,7 @@ impl Templar {
 
     /// Always renders to text (used for template files).
     pub fn render_text(&self, s: &str, vars: &Vars) -> Result<String> {
+        let _guard = VarsGuard::new(vars);
         self.env
             .render_str(s, Self::ctx(vars))
             .map_err(|e| anyhow!("template error: {e:#}"))
@@ -882,6 +985,7 @@ impl Templar {
         } else {
             expr.to_string()
         };
+        let _guard = VarsGuard::new(vars);
         let e = self
             .env
             .compile_expression(expr.trim())

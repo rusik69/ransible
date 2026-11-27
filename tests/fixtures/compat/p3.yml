@@ -1,0 +1,16 @@
+- hosts: w1
+  gather_facts: no
+  vars:
+    users: [{name: a, uid: 1, groups: [x, y]}, {name: b, uid: 2}]
+    cfg: {beta: 3, alpha: one}
+    nested: {list: [1, 2, {k: v}], str: "hello: world", num: 5, t: true, none: null}
+    flag: true
+    items_list: [a, b, c]
+    a_dict: {p: 1, q: 2}
+    text: "the quick brown fox jumps over the lazy dog again and again"
+    lines: [l1, l2]
+  tasks:
+    - template: {src: main.j2, dest: /tmp/ransible-compat-p3-out.txt}
+    - copy: {content: "{{ nested | to_nice_yaml }}", dest: /tmp/ransible-compat-p3-y.txt}
+    - copy: {content: "{{ nested | to_nice_json }}\n", dest: /tmp/ransible-compat-p3-j.txt}
+    - copy: {content: "{{ cfg | to_json }}{{ users | to_yaml }}", dest: /tmp/ransible-compat-p3-k.txt}

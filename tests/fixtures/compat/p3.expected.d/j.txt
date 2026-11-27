@@ -1,0 +1,13 @@
+{
+    "list": [
+        1,
+        2,
+        {
+            "k": "v"
+        }
+    ],
+    "none": null,
+    "num": 5,
+    "str": "hello: world",
+    "t": true
+}

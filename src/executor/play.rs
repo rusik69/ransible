@@ -166,7 +166,9 @@ impl Runner {
             );
         }
         let groups = Value::Object(groups);
-        let play_hosts = Value::Array(names.iter().cloned().map(Value::from).collect());
+        let names_json: Value = Value::Array(names.iter().cloned().map(Value::from).collect());
+        // {"all": every host of the play, "active": hosts still running (not failed/ended)}
+        let play_hosts = json!({"all": names_json.clone(), "active": names_json});
         let mut hosts = vec![];
         let overlay0 = Map::new();
         for n in &names {

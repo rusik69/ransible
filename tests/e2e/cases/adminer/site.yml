@@ -1,0 +1,4 @@
+- hosts: all
+  become: true
+  vars: {adminer_install_dir: /var/www/adminer}
+  roles: [geerlingguy.adminer apache php]

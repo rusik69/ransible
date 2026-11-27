@@ -69,6 +69,19 @@ pub struct Runner {
     pub started: std::sync::atomic::AtomicBool,
 }
 
+impl PlayState<'_> {
+    /// Recompute `ansible_play_hosts` (hosts that have not failed or ended).
+    fn refresh_active(&mut self) {
+        let active: Vec<Value> = self
+            .hosts
+            .iter()
+            .filter(|h| !h.failed && !h.ended)
+            .map(|h| Value::from(h.name.clone()))
+            .collect();
+        self.play_hosts["active"] = Value::Array(active);
+    }
+}
+
 struct PlayState<'p> {
     play: &'p Play,
     hosts: Vec<Host>,

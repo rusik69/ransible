@@ -445,9 +445,31 @@ impl Runner {
         for (idx, it) in list.iter().enumerate() {
             let mut local_overlay;
             let env2;
-            let envr: &TaskEnv = if let (Some(iv), Some(_)) = (&index_var, it) {
+            let envr: &TaskEnv = if let Some(item_v) = it {
                 local_overlay = env.overlay.clone();
-                local_overlay.insert(iv.clone(), idx.into());
+                if let Some(iv) = &index_var {
+                    local_overlay.insert(iv.clone(), idx.into());
+                }
+                let n = list.len();
+                let mut al = json!({
+                    "index": idx + 1, "index0": idx, "first": idx == 0, "last": idx + 1 == n,
+                    "length": n, "revindex": n - idx, "revindex0": n - idx - 1,
+                });
+                if loop_ctl
+                    .get("extended")
+                    .and_then(loose_bool)
+                    .unwrap_or(false)
+                {
+                    al["allitems"] = Value::Array(list.iter().flatten().cloned().collect());
+                    if idx > 0 {
+                        al["previtem"] = list[idx - 1].clone().unwrap_or(Value::Null);
+                    }
+                    if idx + 1 < n {
+                        al["nextitem"] = list[idx + 1].clone().unwrap_or(Value::Null);
+                    }
+                }
+                let _ = item_v;
+                local_overlay.insert("ansible_loop".into(), al);
                 env2 = TaskEnv {
                     play: env.play,
                     hostvars: env.hostvars,
@@ -593,7 +615,7 @@ impl Runner {
             if !ignore_unreach {
                 h.failed = true;
                 h.last_fail = Some((
-                    t.name.clone().unwrap_or_else(|| t.module.clone()),
+                    t.name.clone().unwrap_or_default(),
                     Value::Object(agg.clone()),
                 ));
             }
@@ -608,7 +630,7 @@ impl Runner {
                 h.failed = true;
                 h.stats.failed += 1;
                 h.last_fail = Some((
-                    t.name.clone().unwrap_or_else(|| t.module.clone()),
+                    t.name.clone().unwrap_or_default(),
                     Value::Object(agg.clone()),
                 ));
             }

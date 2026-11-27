@@ -28,10 +28,17 @@ impl Runner {
                 self.run_block(ps, &act, t, overlay)?;
                 continue;
             }
+            ps.refresh_active();
             match t.module.as_str() {
                 "include_tasks" | "import_tasks" => self.run_include_tasks(ps, &act, t, overlay)?,
                 "include_role" | "import_role" => self.run_include_role(ps, &act, t, overlay)?,
-                "meta" => self.run_meta(ps, &act, t, overlay)?,
+                "meta" => {
+                    // `when:` applies per host (e.g. `meta: end_host` for some hosts only)
+                    let sub = self.include_when(ps, &act, t, overlay);
+                    if !sub.is_empty() {
+                        self.run_meta(ps, &sub, t, overlay)?
+                    }
+                }
                 _ => self.run_leaf(ps, &act, t, overlay, None)?,
             }
         }
@@ -498,6 +505,9 @@ impl Runner {
         for _ in 0..10 {
             let mut ran = false;
             let handlers = ps.handlers.clone();
+            // every handler listening to a notified topic/name runs in this pass; names are cleared afterwards
+            let snapshot: Vec<std::collections::BTreeSet<String>> =
+                ps.hosts.iter().map(|h| h.notified.clone()).collect();
             for hd in &handlers {
                 let mut names = to_list(hd.kw.get("listen"));
                 if let Some(n) = &hd.name {
@@ -509,16 +519,11 @@ impl Runner {
                     .filter(|&i| {
                         !ps.hosts[i].failed
                             && !ps.hosts[i].ended
-                            && names.iter().any(|n| ps.hosts[i].notified.contains(n))
+                            && names.iter().any(|n| snapshot[i].contains(n))
                     })
                     .collect();
                 if todo.is_empty() {
                     continue;
-                }
-                for &i in &todo {
-                    for n in &names {
-                        ps.hosts[i].notified.remove(n);
-                    }
                 }
                 ran = true;
                 let mut hd2 = hd.clone();
@@ -537,6 +542,11 @@ impl Runner {
                     let _ = saved;
                     self.banner("RUNNING HANDLER", &title);
                     self.run_leaf_nobanner(ps, &todo, &hd2, overlay)?;
+                }
+            }
+            for (i, h) in ps.hosts.iter_mut().enumerate() {
+                for n in &snapshot[i] {
+                    h.notified.remove(n);
                 }
             }
             if !ran {

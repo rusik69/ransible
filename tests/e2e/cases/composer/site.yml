@@ -1,0 +1,5 @@
+- hosts: all
+  become: true
+  pre_tasks:
+    - apt: {name: [php-cli, php-mbstring, php-xml, unzip, curl, ca-certificates], update_cache: true}
+  roles: [geerlingguy.composer]

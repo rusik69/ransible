@@ -4,10 +4,12 @@ mod events;
 mod executor;
 mod galaxy;
 mod inventory;
+mod lookup;
 mod modules;
 mod modules_extra;
 mod mysql;
 mod playbook;
+mod pyfmt;
 #[cfg(feature = "server")]
 mod server;
 mod template;

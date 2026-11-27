@@ -1,0 +1,63 @@
+- hosts: web
+  gather_facts: no
+  vars:
+    users: [{name: a, uid: 1, groups: [x, y]}, {name: b, uid: 2, groups: [y]}]
+    ports: {http: 80, https: 443}
+  tasks:
+    - name: loop extended
+      debug: msg="{{ ansible_loop.index }}/{{ ansible_loop.length }} first={{ ansible_loop.first }} last={{ ansible_loop.last }} {{ item }}"
+      loop: [p, q, r]
+      loop_control: {extended: true}
+    - name: loop index var
+      debug: msg="{{ idx }}:{{ item.name }}"
+      loop: "{{ users }}"
+      loop_control: {index_var: idx, label: "{{ item.name }}"}
+    - name: subelements
+      debug: msg="{{ item.0.name }}-{{ item.1 }}"
+      with_subelements: ["{{ users }}", groups]
+    - name: nested
+      debug: msg="{{ item.0 }}{{ item.1 }}"
+      with_nested: [[a, b], [1, 2]]
+    - name: dict2items
+      debug: msg="{{ item.key }}={{ item.value }}"
+      loop: "{{ ports | dict2items }}"
+    - name: set_fact computed
+      set_fact:
+        total: "{{ users | map(attribute='uid') | sum }}"
+        names: "{{ users | map(attribute='name') | list | join(',') }}"
+        sel: "{{ users | selectattr('uid', 'gt', 1) | map(attribute='name') | list }}"
+        rej: "{{ users | rejectattr('uid', 'equalto', 1) | list | length }}"
+    - debug: msg="{{ total }} {{ names }} {{ sel }} {{ rej }}"
+    - name: hostvars cross host
+      debug: msg="{{ hostvars['w1'].web_id }} {{ hostvars['w2'].web_id }} {{ groups['web'] | length }} {{ groups['all'] | sort | join(',') }}"
+      run_once: true
+    - name: lookups
+      debug:
+        msg:
+          - "{{ lookup('vars', 'total') }}"
+          - "{{ lookup('items', [1, 2]) | list }}"
+          - "{{ query('items', [1, 2]) }}"
+          - "{{ lookup('env', 'HOME') | length > 0 }}"
+          - "{{ lookup('pipe', 'echo piped') }}"
+          - "{{ lookup('template', 'tpl.j2') }}"
+          - "{{ lookup('file', 'tpl.j2') | length }}"
+          - "{{ lookup('ansible.builtin.sequence', 'start=1 end=3') }}"
+      run_once: true
+    - name: tests and filters
+      debug:
+        msg:
+          - "{{ 'abc' is match('a.c') }} {{ 'abc' is search('b') }} {{ users is iterable }} {{ 5 is divisibleby(5) }}"
+          - "{{ [3,1,2] | sort | list }} {{ [3,1,2] | max }} {{ [3,1,2] | min }} {{ [1,2,2] | unique | list }}"
+          - "{{ 'a-b_c' | regex_replace('[-_]', '.') }} {{ 'x1y22' | regex_findall('[0-9]+') }} {{ 'foo' | regex_search('o+') }}"
+          - "{{ {'a': {'b': 1}} | combine({'a': {'c': 2}}, recursive=True) }}"
+          - "{{ ['a','b'] | product(['1']) | list | length }} {{ [[1,2],[3]] | flatten }}"
+          - "{{ 'hello world' | title }} {{ 'x' | upper }} {{ ' pad ' | trim }} {{ 'abc' | reverse | join }}"
+          - "{{ 7 | string | length }} {{ '3' | int + 4 }} {{ '3.5' | float }} {{ 'yes' | bool }} {{ 0 | bool }}"
+          - "{{ none | default('d') }} {{ omit is defined }} {{ undefinedvar | default('dd', true) }}"
+          - "{{ [1,2,3] | batch(2) | list }} {{ [1,2,3,4] | slice(2) | list }}"
+          - "{{ 'a,b,c' | split(',') | last }} {{ ['b','a'] | sort(reverse=true) }}"
+          - "{{ {'b':1,'a':2} | dictsort }} {{ users | items2dict(key_name='name', value_name='uid') }}"
+          - "{{ '%05.1f' | format(3.14159) }} {{ '{:>4}'.format('x') }}"
+          - "{{ (2 ** 10) }} {{ 7 // 2 }} {{ 7 % 3 }} {{ 7 / 2 }}"
+          - "{{ 'abc'[1:] }} {{ [1,2,3][::-1] }} {{ 'a' ~ 'b' ~ 1 }}"
+      run_once: true

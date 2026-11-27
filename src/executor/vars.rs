@@ -92,10 +92,14 @@ impl Runner {
             .collect();
         v.insert("group_names".into(), Value::Array(gn));
         v.insert("groups".into(), env.groups.clone());
-        v.insert("ansible_play_hosts".into(), env.play_hosts.clone());
-        v.insert("ansible_play_hosts_all".into(), env.play_hosts.clone());
-        v.insert("ansible_play_batch".into(), env.play_hosts.clone());
-        v.insert("play_hosts".into(), env.play_hosts.clone());
+        let (all, active) = (
+            env.play_hosts["all"].clone(),
+            env.play_hosts["active"].clone(),
+        );
+        v.insert("ansible_play_hosts".into(), active.clone());
+        v.insert("ansible_play_hosts_all".into(), all);
+        v.insert("ansible_play_batch".into(), active.clone());
+        v.insert("play_hosts".into(), active);
         v.insert("omit".into(), crate::modules::OMIT.into());
         v.insert(
             "playbook_dir".into(),

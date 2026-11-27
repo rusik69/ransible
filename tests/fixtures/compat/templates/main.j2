@@ -1,0 +1,35 @@
+{{ ansible_managed | comment }}
+# host={{ inventory_hostname }}
+{% for u in users %}
+user {{ u.name }} uid={{ u.uid }}{% if u.groups | default([]) %} groups={{ u.groups | join(',') }}{% endif %}
+
+{% endfor %}
+{%- for k, v in cfg.items() | sort %}
+{{ k }} = {{ v }}
+{%- endfor %}
+{% set ns = namespace(total=0) %}
+{% for u in users %}{% set ns.total = ns.total + u.uid %}{% endfor %}
+total={{ ns.total }}
+{# a comment that vanishes #}
+json={{ cfg | to_json }}
+nice:
+{{ cfg | to_nice_json }}
+yaml:
+{{ cfg | to_nice_yaml }}
+{{ nested | to_nice_yaml(indent=2) }}
+indented:
+{{ "a\nb" | indent(4) }}
+{{ "a\nb" | indent(2, first=True) }}
+{% macro row(name, val='dflt') %}[{{ name }}:{{ val }}]{% endmacro %}
+{{ row('x') }}{{ row('y', 2) }}
+{% raw %}{{ not rendered }}{% endraw %}
+{{ flag | ternary('on', 'off') }} {{ missing | default('none') }} {{ 'a b c' | replace(' ', '_') }}
+{{ items_list | map('upper') | join('|') }} {{ items_list | length }} {{ items_list | first }} {{ items_list | last }}
+{{ "%-6s|%3d|" | format('ab', 7) }}{{ 3.14159 | round(2) }} {{ 10 | float / 4 }} {{ [1,2,3] | sum }}
+{% if cfg.alpha is defined and cfg.beta | int > 1 %}beta-big{% elif cfg.beta is defined %}beta-small{% else %}nobeta{% endif %}
+{% include 'inc.j2' %}
+{{ text | wordwrap(20) }}
+{{ "ABC" | lower }}{{ "abc" | capitalize }}{{ " x " | trim }}{{ "abc" | center(7) }}|
+{{ (a_dict | dict2items | map(attribute='key') | list) }}
+{{ lines | join('\n') }}
+end

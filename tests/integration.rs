@@ -320,3 +320,76 @@ fn vault_ids_select_password_by_label_and_missing_secret_is_an_error() {
     assert!(String::from_utf8_lossy(&missing.stderr).contains("Decryption failed"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Run a compat fixture and compare msg + recap lines (order-insensitive) with real Ansible's output.
+fn compat(name: &str) {
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            &format!("tests/fixtures/compat/{name}.yml"),
+            "-i",
+            "tests/fixtures/compat/inv.ini",
+        ],
+        &format!("/tmp/ransible-it-compat-{name}"),
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let norm = |s: &str| -> String {
+        let mut v: Vec<String> = s
+            .lines()
+            .filter(|l| {
+                !l.starts_with("fatal:")
+                    && (l.contains("\"msg\"")
+                        || l.starts_with("w1 ")
+                        || l.starts_with("w2 ")
+                        || l.starts_with("d1 "))
+            })
+            .map(|l| {
+                l.replace(" : ok=", " ok=")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        v.sort();
+        v.join("\n")
+    };
+    let want = std::fs::read_to_string(format!("tests/fixtures/compat/{name}.expected")).unwrap();
+    assert_eq!(
+        norm(&stdout),
+        norm(&want),
+        "output differs from real Ansible for {name}"
+    );
+}
+
+#[test]
+fn compat_loops_lookups_filters_match_ansible() {
+    compat("p1");
+}
+
+#[test]
+fn compat_blocks_handlers_meta_match_ansible() {
+    compat("p2");
+}
+
+#[test]
+fn compat_templates_and_yaml_json_filters_are_byte_identical_to_ansible() {
+    for f in ["out", "y", "j", "k"] {
+        let _ = std::fs::remove_file(format!("/tmp/ransible-compat-p3-{f}.txt"));
+    }
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            "tests/fixtures/compat/p3.yml",
+            "-i",
+            "tests/fixtures/compat/inv.ini",
+        ],
+        "/tmp/ransible-it-compat-p3",
+    );
+    assert_eq!(code, 0, "{stdout}");
+    for f in ["out", "y", "j", "k"] {
+        let got = std::fs::read_to_string(format!("/tmp/ransible-compat-p3-{f}.txt")).unwrap();
+        let want = std::fs::read_to_string(format!("tests/fixtures/compat/p3.expected.d/{f}.txt"))
+            .unwrap();
+        assert_eq!(got, want, "rendered file '{f}' differs from real Ansible's");
+    }
+}

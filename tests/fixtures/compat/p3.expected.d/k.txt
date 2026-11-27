@@ -1,0 +1,4 @@
+{"beta": 3, "alpha": "one"}- groups: [x, y]
+  name: a
+  uid: 1
+- {name: b, uid: 2}

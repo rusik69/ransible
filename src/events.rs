@@ -232,7 +232,25 @@ impl Sink for ConsoleSink {
 }
 
 /// JSON with 4-space indentation (like Ansible's debug output).
+/// Recursively sort object keys (Ansible's callbacks print results with sorted keys).
+pub fn sorted(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => {
+            let mut keys: Vec<&String> = o.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sorted(&o[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn pretty4(v: &Value) -> String {
+    let v = &sorted(v);
     let mut buf = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
@@ -242,6 +260,7 @@ pub fn pretty4(v: &Value) -> String {
 
 /// JSON with Python-style separators (", " and ": "), like Ansible's default callback.
 pub fn pyjson(v: &Value) -> String {
+    let v = &sorted(v);
     struct Py;
     impl serde_json::ser::Formatter for Py {
         fn begin_array_value<W: ?Sized + std::io::Write>(
