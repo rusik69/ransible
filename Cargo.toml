@@ -20,7 +20,7 @@ jmespath = "0.3"
 md-5 = "0.10"
 minijinja = { version = "3.1.0", features = ["json", "loop_controls", "preserve_order", "serde", "unicode"] }
 minijinja-contrib = { version = "3.1.0", features = ["html_entities", "pycompat", "rand", "wordcount", "wordwrap"] }
-pbkdf2 = "0.12"
+pbkdf2 = "0.13"
 rand = "0.8"
 regex = "1.13.2"
 rpassword = "7"
