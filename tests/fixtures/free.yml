@@ -1,0 +1,7 @@
+- hosts: web
+  gather_facts: no
+  strategy: free
+  tasks:
+    - command: sleep 2
+      when: inventory_hostname == 'web1'
+    - debug: msg="after {{ inventory_hostname }}"

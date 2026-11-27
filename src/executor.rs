@@ -40,6 +40,7 @@ pub struct Stats {
     pub ignored: u32,
 }
 
+#[derive(Clone)]
 pub struct Host {
     pub name: String,
     base: Vars,   // role defaults < inventory vars
@@ -1625,6 +1626,41 @@ impl Runner {
         }
     }
 
+    /// One play pass over `batch` (gather facts, pre_tasks, roles, tasks, post_tasks, handlers).
+    fn run_batch(
+        &self,
+        ps: &mut PlayState,
+        batch: &[usize],
+        role_tasks: &[Task],
+        ov: &Map<String, Value>,
+    ) -> Result<()> {
+        let play = ps.play;
+        if play.gather_facts {
+            let t = Task {
+                name: Some("Gathering Facts".into()),
+                module: "setup".into(),
+                args: json!({}),
+                dir: play.dir.clone(),
+                ..Default::default()
+            };
+            let act = self.active(ps, batch);
+            if !act.is_empty() {
+                self.run_leaf(ps, &act, &t, ov, Some("Gathering Facts"))?;
+            }
+        }
+        self.run_tasks(ps, batch, &play.pre_tasks, ov)?;
+        let act = self.active(ps, batch);
+        self.flush_handlers(ps, &act, ov)?;
+        self.run_tasks(ps, batch, role_tasks, ov)?;
+        self.run_tasks(ps, batch, &play.tasks, ov)?;
+        let act = self.active(ps, batch);
+        self.flush_handlers(ps, &act, ov)?;
+        self.run_tasks(ps, batch, &play.post_tasks, ov)?;
+        let act = self.active(ps, batch);
+        self.flush_handlers(ps, &act, ov)?;
+        Ok(())
+    }
+
     pub fn run_play(&self, play: &Play) -> Result<bool> {
         let mut names = self.inv.read().unwrap().select(&play.hosts);
         if let Some(l) = &self.opts.limit {
@@ -1818,29 +1854,44 @@ impl Runner {
         }
         let ov = Map::new();
         for batch in &batches {
-            if play.gather_facts {
-                let t = Task {
-                    name: Some("Gathering Facts".into()),
-                    module: "setup".into(),
-                    args: json!({}),
-                    dir: play.dir.clone(),
-                    ..Default::default()
-                };
-                let act = self.active(&ps, batch);
-                if !act.is_empty() {
-                    self.run_leaf(&mut ps, &act, &t, &ov, Some("Gathering Facts"))?;
+            if play.strategy_free && batch.len() > 1 {
+                // free strategy: every host runs the whole play independently, at its own pace
+                let results: Vec<(usize, Host, Result<()>)> = std::thread::scope(|s| {
+                    let handles: Vec<_> = batch
+                        .iter()
+                        .map(|&i| {
+                            let host = ps.hosts[i].clone();
+                            let (handlers, groups, play_hosts) = (
+                                ps.handlers.clone(),
+                                ps.groups.clone(),
+                                ps.play_hosts.clone(),
+                            );
+                            let (role_tasks, ov) = (&role_tasks, &ov);
+                            s.spawn(move || {
+                                let mut mini = PlayState {
+                                    play,
+                                    hosts: vec![host],
+                                    handlers,
+                                    groups,
+                                    play_hosts,
+                                };
+                                let r = self.run_batch(&mut mini, &[0], role_tasks, ov);
+                                (i, mini.hosts.pop().unwrap(), r)
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().expect("host thread panicked"))
+                        .collect()
+                });
+                for (i, host, r) in results {
+                    ps.hosts[i] = host;
+                    r?;
                 }
+            } else {
+                self.run_batch(&mut ps, batch, &role_tasks, &ov)?;
             }
-            self.run_tasks(&mut ps, batch, &play.pre_tasks, &ov)?;
-            let act = self.active(&ps, batch);
-            self.flush_handlers(&mut ps, &act, &ov)?;
-            self.run_tasks(&mut ps, batch, &role_tasks, &ov)?;
-            self.run_tasks(&mut ps, batch, &play.tasks, &ov)?;
-            let act = self.active(&ps, batch);
-            self.flush_handlers(&mut ps, &act, &ov)?;
-            self.run_tasks(&mut ps, batch, &play.post_tasks, &ov)?;
-            let act = self.active(&ps, batch);
-            self.flush_handlers(&mut ps, &act, &ov)?;
         }
         let mut ok = true;
         let mut st = self.all_stats.lock().unwrap();

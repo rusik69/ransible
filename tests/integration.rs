@@ -189,3 +189,44 @@ fn filters_match_ansible() {
     let want = squash(&std::fs::read_to_string("tests/fixtures/filters.expected").unwrap());
     assert_eq!(got, want);
 }
+
+#[test]
+fn free_strategy_does_not_wait_for_slow_hosts() {
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            "tests/fixtures/free.yml",
+            "-i",
+            "tests/fixtures/inventory.ini",
+        ],
+        "/tmp/ransible-it-9",
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let p1 = stdout.find("after web1").expect("web1 output");
+    let p2 = stdout.find("after web2").expect("web2 output");
+    assert!(
+        p2 < p1,
+        "web2 should finish before the slow web1 under strategy: free\n{stdout}"
+    );
+    assert!(stdout.contains("web1") && stdout.contains("ok=2") && stdout.contains("web2"));
+}
+
+#[test]
+fn linear_strategy_keeps_hosts_in_lockstep() {
+    let src = std::fs::read_to_string("tests/fixtures/free.yml")
+        .unwrap()
+        .replace("  strategy: free\n", "");
+    let tmp = std::env::temp_dir().join("ransible-linear.yml");
+    std::fs::write(&tmp, src).unwrap();
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            tmp.to_str().unwrap(),
+            "-i",
+            "tests/fixtures/inventory.ini",
+        ],
+        "/tmp/ransible-it-10",
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.find("after web1").unwrap() < stdout.find("after web2").unwrap());
+}

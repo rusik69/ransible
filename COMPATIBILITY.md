@@ -31,7 +31,8 @@ Offline tests (`cargo test`) additionally pin variable precedence to real Ansibl
 | SSH + local connections, sudo become | done |
 | `async`/`poll: 0` + `async_status`, `max_fail_percentage`, `any_errors_fatal`, rescue vars (`ansible_failed_task/result`) | done |
 | `ansible.cfg` + `ANSIBLE_*` env, SSH password (needs `sshpass`) and become password, `docker`/`podman` connections, `-k/-K/-T/--start-at-task/--list-tags`, `ansible-playbook`/`ansible`/`ansible-vault` argv0 names, shell completions | done |
-| `strategy: free`, `add_host`, `group_by`, collections/Galaxy, vault ids | not yet |
+| `strategy: free` (each host runs the play at its own pace; `hostvars` of other hosts are not visible during the play), `add_host`, `group_by` | done |
+| Non-role collections/Galaxy collections, vault ids | not yet |
 | AWX-style web UI + REST API in the same binary (`ransible serve`): projects, inventories, credentials, templates, jobs with live output, users/roles, dashboard | done incl. schedules, notifications, activity stream, workflows with approvals, surveys, teams and object-level grants (OIDC/LDAP, remote workers: planned) |
 
 ## Modules (native)
