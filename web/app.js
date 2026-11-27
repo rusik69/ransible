@@ -23,7 +23,7 @@ async function api(path, opts = {}) {
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401 && !path.startsWith('/auth/login')) { logout(true); throw new Error('Session expired'); }
+  if (res.status === 401 && token && !path.startsWith('/auth/login')) { logout(true); throw new Error('Session expired'); }
   if (res.status === 204) return null;
   const ct = res.headers.get('content-type') || '';
   const data = ct.includes('json') ? await res.json() : await res.text();
@@ -348,7 +348,8 @@ function account() {
 
 // ---------- router ----------
 async function route() {
-  if (!token) return loginView();
+  if (!token && !me) { try { me = await api('/me/'); } catch (e) { return loginView(); } } // proxy-authenticated session needs no token
+  if (!token && !me) return loginView();
   try {
     if (!me) me = await api('/me/');
     const [r, arg] = (location.hash.replace(/^#\//, '') || 'dashboard').split('/');

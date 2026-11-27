@@ -27,6 +27,10 @@ fn curl_ok() -> bool {
 }
 
 fn start(tag: &str) -> Server {
+    start_with(tag, &[])
+}
+
+fn start_with(tag: &str, extra: &[&str]) -> Server {
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -46,6 +50,7 @@ fn start(tag: &str) -> Server {
             "--admin-password-file",
             dir.join("adminpw").to_str().unwrap(),
         ])
+        .args(extra)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1629,5 +1634,123 @@ fn remote_worker_runs_jobs_streams_output_and_can_be_canceled() {
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "cancel must not wait for sleep 30"
+    );
+}
+
+fn curl_h(s: &Server, path: &str, headers: &[(&str, &str)]) -> (u16, Value) {
+    let mut c = Command::new("curl");
+    c.args(["-s", "-m", "20", "-w", "\n%{http_code}"]);
+    for (k, v) in headers {
+        c.args(["-H", &format!("{k}: {v}")]);
+    }
+    c.arg(format!("{}{}", s.base, path));
+    let out = String::from_utf8_lossy(&c.output().unwrap().stdout).to_string();
+    let (b, code) = out.rsplit_once('\n').unwrap_or(("", "0"));
+    (
+        code.trim().parse().unwrap_or(0),
+        serde_json::from_str(b).unwrap_or(Value::Null),
+    )
+}
+
+#[test]
+fn reverse_proxy_authentication_with_group_mapping() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start_with(
+        "proxy",
+        &[
+            "--proxy-auth-header",
+            "X-Remote-User",
+            "--proxy-groups-header",
+            "X-Remote-Groups",
+            "--proxy-admin-group",
+            "ransible-admins",
+            "--proxy-operator-group",
+            "ransible-ops",
+        ],
+    );
+    // no identity, no token: rejected
+    assert_eq!(curl_h(&s, "/api/v2/me/", &[]).0, 401);
+    // identity header from the trusted (loopback) peer: account created on first sight
+    let (c, me) = curl_h(
+        &s,
+        "/api/v2/me/",
+        &[
+            ("X-Remote-User", "alice"),
+            ("X-Remote-Groups", "staff, ransible-admins"),
+        ],
+    );
+    assert_eq!(
+        (c, me["username"].as_str(), me["role"].as_str()),
+        (200, Some("alice"), Some("admin"))
+    );
+    assert_eq!(
+        curl_h(
+            &s,
+            "/api/v2/me/",
+            &[
+                ("X-Remote-User", "olga"),
+                ("X-Remote-Groups", "ransible-ops")
+            ]
+        )
+        .1["role"],
+        "operator"
+    );
+    assert_eq!(
+        curl_h(
+            &s,
+            "/api/v2/me/",
+            &[("X-Remote-User", "bob"), ("X-Remote-Groups", "staff")]
+        )
+        .1["role"],
+        "viewer"
+    );
+    // groups drive the role on every request (demotion works)
+    assert_eq!(
+        curl_h(
+            &s,
+            "/api/v2/me/",
+            &[("X-Remote-User", "alice"), ("X-Remote-Groups", "staff")]
+        )
+        .1["role"],
+        "viewer"
+    );
+    // proxy-created accounts have no usable password
+    assert_eq!(login(&s, "alice", "").0, 401);
+    assert_eq!(login(&s, "bob", "proxy-managed").0, 401);
+    // control characters in the identity are rejected
+    assert_eq!(curl_h(&s, "/api/v2/me/", &[("X-Remote-User", "")]).0, 401);
+    // local password login keeps working next to proxy auth
+    assert_eq!(login(&s, "admin", "admin-password-1").0, 200);
+}
+
+#[test]
+fn identity_header_is_ignored_from_untrusted_peers() {
+    if !curl_ok() {
+        return;
+    }
+    // loopback is NOT in the trusted list, so a spoofed header must not authenticate
+    let s = start_with(
+        "proxy-untrusted",
+        &[
+            "--proxy-auth-header",
+            "X-Remote-User",
+            "--proxy-trusted-ip",
+            "10.9.8.7",
+            "--proxy-admin-group",
+            "x",
+        ],
+    );
+    let (c, _) = curl_h(&s, "/api/v2/me/", &[("X-Remote-User", "admin")]);
+    assert_eq!(c, 401);
+    assert_eq!(
+        curl_h(
+            &s,
+            "/api/v2/projects/",
+            &[("X-Remote-User", "mallory"), ("X-Remote-Groups", "x")]
+        )
+        .0,
+        401
     );
 }

@@ -196,6 +196,21 @@ enum Cmd {
         /// TLS private key (PEM)
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        /// Trust an authenticating reverse proxy: header carrying the user name (e.g. X-Forwarded-User)
+        #[arg(long)]
+        proxy_auth_header: Option<String>,
+        /// Header carrying the user's groups, comma separated (e.g. X-Forwarded-Groups)
+        #[arg(long, requires = "proxy_auth_header")]
+        proxy_groups_header: Option<String>,
+        /// Members of this group become admins
+        #[arg(long)]
+        proxy_admin_group: Option<String>,
+        /// Members of this group become operators (others are viewers)
+        #[arg(long)]
+        proxy_operator_group: Option<String>,
+        /// Peer IP addresses allowed to set the identity header (repeatable; default: loopback)
+        #[arg(long = "proxy-trusted-ip")]
+        proxy_trusted_ip: Vec<std::net::IpAddr>,
     },
     /// Run jobs for a ransible server (remote execution node)
     Worker {
@@ -570,6 +585,11 @@ fn run() -> Result<i32> {
             max_concurrent_jobs,
             tls_cert,
             tls_key,
+            proxy_auth_header,
+            proxy_groups_header,
+            proxy_admin_group,
+            proxy_operator_group,
+            proxy_trusted_ip,
         } => {
             let data_dir = data_dir.unwrap_or_else(|| {
                 PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
@@ -590,6 +610,17 @@ fn run() -> Result<i32> {
                 admin_password,
                 max_jobs: max_concurrent_jobs,
                 tls: tls_cert.zip(tls_key),
+                proxy_auth: proxy_auth_header.map(|header| server::ProxyAuth {
+                    header,
+                    groups_header: proxy_groups_header,
+                    admin_group: proxy_admin_group,
+                    operator_group: proxy_operator_group,
+                    trusted: if proxy_trusted_ip.is_empty() {
+                        vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+                    } else {
+                        proxy_trusted_ip
+                    },
+                }),
             }))?;
             Ok(0)
         }

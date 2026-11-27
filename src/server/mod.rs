@@ -27,8 +27,94 @@ use std::sync::{Arc, Mutex};
 #[folder = "web/"]
 struct Assets;
 
+/// Trust an authenticating reverse proxy (oauth2-proxy, Authelia, Keycloak gatekeeper, ...): the
+/// user name (and optionally groups) come from request headers, but only when the TCP peer is trusted.
+#[derive(Clone, Debug)]
+pub struct ProxyAuth {
+    pub header: String,
+    pub groups_header: Option<String>,
+    pub admin_group: Option<String>,
+    pub operator_group: Option<String>,
+    pub trusted: Vec<std::net::IpAddr>,
+}
+
+/// TCP peer address of a connection (plain or TLS), used for proxy-trust decisions.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerAddr(pub std::net::SocketAddr);
+
+impl
+    axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tokio::net::TcpListener>>
+    for PeerAddr
+{
+    fn connect_info(s: axum::serve::IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        PeerAddr(*s.remote_addr())
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, tls::TlsListener>>
+    for PeerAddr
+{
+    fn connect_info(s: axum::serve::IncomingStream<'_, tls::TlsListener>) -> Self {
+        PeerAddr(*s.remote_addr())
+    }
+}
+
+impl ProxyAuth {
+    /// (username, groups) when the request carries the identity header and comes from a trusted peer.
+    fn identify(&self, parts: &Parts) -> Option<(String, Vec<String>)> {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<PeerAddr>>()?
+            .0
+            .0
+            .ip();
+        if !self.trusted.contains(&peer) {
+            return None;
+        }
+        let name = parts
+            .headers
+            .get(self.header.as_str())?
+            .to_str()
+            .ok()?
+            .trim()
+            .to_string();
+        if name.is_empty() || name.len() > 128 || name.chars().any(|c| c.is_control()) {
+            return None;
+        }
+        let groups = self
+            .groups_header
+            .as_deref()
+            .and_then(|h| parts.headers.get(h))
+            .and_then(|v| v.to_str().ok())
+            .map(|v| {
+                v.split([',', ';'])
+                    .map(|g| g.trim().to_string())
+                    .filter(|g| !g.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((name, groups))
+    }
+
+    /// Role implied by group membership (None when no group mapping is configured).
+    fn role_for(&self, groups: &[String]) -> Option<&'static str> {
+        if self.admin_group.is_none() && self.operator_group.is_none() {
+            return None;
+        }
+        let has = |g: &Option<String>| g.as_ref().map(|g| groups.contains(g)).unwrap_or(false);
+        Some(if has(&self.admin_group) {
+            "admin"
+        } else if has(&self.operator_group) {
+            "operator"
+        } else {
+            "viewer"
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
+    pub proxy: Arc<Option<ProxyAuth>>,
     pub db: Arc<Mutex<Connection>>,
     pub master: Arc<String>,
     pub data_dir: Arc<PathBuf>,
@@ -128,6 +214,7 @@ pub struct Options {
     pub admin_password: Option<String>,
     pub max_jobs: usize,
     pub tls: Option<(PathBuf, PathBuf)>,
+    pub proxy_auth: Option<ProxyAuth>,
 }
 
 // ---------- errors ----------
@@ -245,7 +332,40 @@ impl FromRequestParts<AppState> for AuthUser {
                     .map(String::from);
             }
         }
+        let proxy_identity = if token.is_none() && basic.is_none() {
+            state
+                .proxy
+                .as_ref()
+                .as_ref()
+                .and_then(|p| p.identify(parts).map(|(n, g)| (p.role_for(&g), n)))
+        } else {
+            None
+        };
         let c = state.db.lock().unwrap();
+        if let Some((role, name)) = proxy_identity {
+            // first sight creates the account (no usable password); group mapping keeps the role in sync
+            c.execute(
+                "INSERT OR IGNORE INTO users (username, pw_hash, role) VALUES (?1, 'proxy-managed', ?2)",
+                rusqlite::params![name, role.unwrap_or("viewer")],
+            )?;
+            if let Some(r) = role {
+                c.execute(
+                    "UPDATE users SET role = ?1 WHERE username = ?2",
+                    rusqlite::params![r, name],
+                )?;
+            }
+            let rows = db::query(
+                &c,
+                "SELECT id, username, role FROM users WHERE username = ?1",
+                &[SqlValue::Text(name)],
+            )?;
+            let r = rows.into_iter().next().ok_or_else(unauth)?;
+            return Ok(AuthUser {
+                id: r["id"].as_i64().unwrap_or(0),
+                username: r["username"].as_str().unwrap_or("").into(),
+                role: r["role"].as_str().unwrap_or("viewer").into(),
+            });
+        }
         if let Some(t) = token {
             let rows = db::query(
                 &c,
@@ -1887,9 +2007,11 @@ pub fn build_state(
     data_dir: &std::path::Path,
     max_jobs: usize,
     conn: Connection,
+    proxy: Option<ProxyAuth>,
 ) -> Result<AppState> {
     std::fs::create_dir_all(data_dir)?;
     Ok(AppState {
+        proxy: Arc::new(proxy),
         db: Arc::new(Mutex::new(conn)),
         master: Arc::new(load_master(data_dir)?),
         data_dir: Arc::new(data_dir.to_path_buf()),
@@ -1986,7 +2108,7 @@ async fn scheduler(st: AppState) {
 pub async fn serve(opts: Options) -> Result<()> {
     std::fs::create_dir_all(&opts.data_dir)?;
     let conn = db::open(&opts.data_dir.join("ransible.db"))?;
-    let st = build_state(&opts.data_dir, opts.max_jobs, conn)?;
+    let st = build_state(&opts.data_dir, opts.max_jobs, conn, opts.proxy_auth.clone())?;
     bootstrap_admin(&st, opts.admin_password)?;
     // jobs left running by a previous process cannot be resumed
     {
@@ -2006,9 +2128,12 @@ pub async fn serve(opts: Options) -> Result<()> {
                 "ransible: listening on https://{}",
                 axum::serve::Listener::local_addr(&listener)?
             );
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown)
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<PeerAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
         }
         None => {
             let listener = tokio::net::TcpListener::bind(&opts.listen)
@@ -2016,14 +2141,23 @@ pub async fn serve(opts: Options) -> Result<()> {
                 .with_context(|| format!("binding {}", opts.listen))?;
             let addr = listener.local_addr()?;
             eprintln!("ransible: listening on http://{addr}");
+            if opts.proxy_auth.is_some() {
+                eprintln!(
+                    "ransible: proxy authentication enabled; trusting identity headers only from {:?}",
+                    opts.proxy_auth.as_ref().map(|p| &p.trusted)
+                );
+            }
             if !addr.ip().is_loopback() {
                 eprintln!(
                     "ransible: WARNING: serving plain HTTP on a non-loopback address; use --tls-cert/--tls-key or a TLS-terminating reverse proxy"
                 );
             }
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown)
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<PeerAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
         }
     }
     Ok(())
