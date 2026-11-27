@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# e2e artifacts / fetched third-party roles
+tests/e2e/.work/
+tests/e2e/cases/*/roles/geerlingguy.*
+
+# editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# local env / secrets
+.env
+*.pem
+*.key
+vault-pass*
+.claude/settings.local.json
+
+# release output
+/dist/
