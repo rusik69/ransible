@@ -267,6 +267,41 @@ fn assigned(st: &AppState, w: &WorkerAuth, id: i64) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// tar.gz with `job/` (inventory, credentials, extra vars) and `project/`.
+#[cfg(unix)]
+fn build_bundle(
+    id: i64,
+    job_dir: &std::path::Path,
+    project_dir: &std::path::Path,
+) -> anyhow::Result<Vec<u8>> {
+    let stage = job_dir.with_file_name(format!("{id}-stage"));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    std::os::unix::fs::symlink(job_dir, stage.join("job"))?;
+    std::os::unix::fs::symlink(project_dir, stage.join("project"))?;
+    let out = std::process::Command::new("tar")
+        .args(["-czhf", "-", "-C"])
+        .arg(&stage)
+        .args(["job", "project"])
+        .output()?;
+    let _ = std::fs::remove_dir_all(&stage);
+    if !out.status.success() {
+        anyhow::bail!("tar failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(out.stdout)
+}
+
+#[cfg(not(unix))]
+fn build_bundle(
+    _id: i64,
+    _job_dir: &std::path::Path,
+    _project_dir: &std::path::Path,
+) -> anyhow::Result<Vec<u8>> {
+    anyhow::bail!(
+        "remote workers need a Unix server (the job bundle is built with symlinks and tar)"
+    )
+}
+
 pub async fn bundle(State(st): State<AppState>, w: WorkerAuth, Path(id): Path<i64>) -> R<Response> {
     assigned(&st, &w, id)?;
     let params: Map<String, Value> = {
@@ -287,28 +322,9 @@ pub async fn bundle(State(st): State<AppState>, w: WorkerAuth, Path(id): Path<i6
             jobs::project_dir(&st, &project),
         )
     };
-    let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let stage = job_dir.with_file_name(format!("{id}-stage"));
-        let _ = std::fs::remove_dir_all(&stage);
-        std::fs::create_dir_all(&stage)?;
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&job_dir, stage.join("job"))?;
-            std::os::unix::fs::symlink(&project_dir, stage.join("project"))?;
-        }
-        let out = std::process::Command::new("tar")
-            .args(["-czhf", "-", "-C"])
-            .arg(&stage)
-            .args(["job", "project"])
-            .output()?;
-        let _ = std::fs::remove_dir_all(&stage);
-        if !out.status.success() {
-            anyhow::bail!("tar failed: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        Ok(out.stdout)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))??;
+    let bytes = tokio::task::spawn_blocking(move || build_bundle(id, &job_dir, &project_dir))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))??;
     Ok(([(header::CONTENT_TYPE, "application/gzip")], bytes).into_response())
 }
 
