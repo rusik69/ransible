@@ -1269,3 +1269,116 @@ fn teams_and_object_level_grants() {
         0
     );
 }
+
+#[test]
+fn serves_https_with_tls_cert_and_key() {
+    if !curl_ok() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ransible-tls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cert, key) = (dir.join("cert.pem"), dir.join("key.pem"));
+    let made = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1,DNS:localhost",
+            "-keyout",
+        ])
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output();
+    if !made.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("openssl not available; skipping TLS test");
+        return;
+    }
+    std::fs::write(dir.join("adminpw"), "admin-password-1\n").unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let child = Command::new(env!("CARGO_BIN_EXE_ransible"))
+        .args([
+            "serve",
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--data-dir",
+            dir.join("data").to_str().unwrap(),
+            "--admin-password-file",
+            dir.join("adminpw").to_str().unwrap(),
+            "--tls-cert",
+            cert.to_str().unwrap(),
+            "--tls-key",
+            key.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let srv = Server {
+        child,
+        base: format!("https://127.0.0.1:{port}"),
+        dir: dir.clone(),
+    };
+    let get = |args: &[&str], url: &str| {
+        Command::new("curl")
+            .args(["-s", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}"])
+            .args(args)
+            .arg(url)
+            .output()
+            .unwrap()
+    };
+    let t = Instant::now();
+    let mut code = String::new();
+    while t.elapsed() < Duration::from_secs(15) {
+        code = String::from_utf8_lossy(
+            &get(
+                &["--cacert", cert.to_str().unwrap()],
+                &format!("{}/api/v2/ping/", srv.base),
+            )
+            .stdout,
+        )
+        .to_string();
+        if code == "200" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(code, "200", "HTTPS ping with the trusted certificate");
+    // an untrusted client must be rejected by certificate verification; plain HTTP must not work
+    let untrusted = get(&[], &format!("{}/api/v2/ping/", srv.base));
+    assert!(
+        !untrusted.status.success(),
+        "curl without --cacert must fail verification"
+    );
+    let plain = get(&[], &format!("http://127.0.0.1:{port}/api/v2/ping/"));
+    assert_ne!(String::from_utf8_lossy(&plain.stdout), "200");
+    // login works over TLS
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-m",
+            "20",
+            "--cacert",
+            cert.to_str().unwrap(),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            r#"{"username":"admin","password":"admin-password-1"}"#,
+            &format!("{}/api/v2/auth/login/", srv.base),
+        ])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("token"));
+}

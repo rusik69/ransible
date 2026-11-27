@@ -3,9 +3,7 @@ use crate::conn::Conn;
 use crate::events::{Event, HostStat, Sink};
 use crate::inventory::Inventory;
 use crate::modules::{self, Ctx};
-use crate::playbook::{
-    Play, Role, Task, apply_inherit, load_role, loose_bool, read_yaml,
-};
+use crate::playbook::{Play, Role, Task, apply_inherit, load_role, loose_bool, read_yaml};
 use crate::template::{Templar, Vars};
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value, json};
@@ -172,4 +170,3 @@ impl Runner {
         self.emit(Event::Message { text: text.into() });
     }
 }
-

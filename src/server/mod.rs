@@ -3,6 +3,7 @@ mod cron;
 mod db;
 mod jobs;
 mod survey;
+mod tls;
 mod workflows;
 
 use anyhow::{Context, Result, anyhow};
@@ -125,6 +126,7 @@ pub struct Options {
     pub data_dir: PathBuf,
     pub admin_password: Option<String>,
     pub max_jobs: usize,
+    pub tls: Option<(PathBuf, PathBuf)>,
 }
 
 // ---------- errors ----------
@@ -1922,14 +1924,35 @@ pub async fn serve(opts: Options) -> Result<()> {
     }
     tokio::spawn(scheduler(st.clone()));
     let app = router(st);
-    let listener = tokio::net::TcpListener::bind(&opts.listen)
-        .await
-        .with_context(|| format!("binding {}", opts.listen))?;
-    eprintln!("ransible: listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    match &opts.tls {
+        Some((cert, key)) => {
+            let listener = tls::bind(&opts.listen, cert, key).await?;
+            eprintln!(
+                "ransible: listening on https://{}",
+                axum::serve::Listener::local_addr(&listener)?
+            );
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(&opts.listen)
+                .await
+                .with_context(|| format!("binding {}", opts.listen))?;
+            let addr = listener.local_addr()?;
+            eprintln!("ransible: listening on http://{addr}");
+            if !addr.ip().is_loopback() {
+                eprintln!(
+                    "ransible: WARNING: serving plain HTTP on a non-loopback address; use --tls-cert/--tls-key or a TLS-terminating reverse proxy"
+                );
+            }
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await?;
+        }
+    }
     Ok(())
 }

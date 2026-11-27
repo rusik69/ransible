@@ -189,6 +189,12 @@ enum Cmd {
         /// Maximum number of jobs running at once
         #[arg(long, default_value_t = 4)]
         max_concurrent_jobs: usize,
+        /// TLS certificate chain (PEM); enables HTTPS together with --tls-key
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        /// TLS private key (PEM)
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
     },
     /// Print shell completions (bash, zsh, fish, elvish, powershell)
     Completions { shell: clap_complete::Shell },
@@ -540,6 +546,8 @@ fn run() -> Result<i32> {
             data_dir,
             admin_password_file,
             max_concurrent_jobs,
+            tls_cert,
+            tls_key,
         } => {
             let data_dir = data_dir.unwrap_or_else(|| {
                 PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
@@ -559,6 +567,7 @@ fn run() -> Result<i32> {
                 data_dir,
                 admin_password,
                 max_jobs: max_concurrent_jobs,
+                tls: tls_cert.zip(tls_key),
             }))?;
             Ok(0)
         }
