@@ -142,7 +142,7 @@ impl ConsoleSink {
                 let head = self.paint(code, &format!("{word}: [{host}]{label}"));
                 if module == "debug" {
                     let mut r = obj.clone();
-                    for k in ["changed", "item", "ansible_loop_var"] {
+                    for k in ["changed", "failed", "item", "ansible_loop_var"] {
                         r.remove(k);
                     }
                     format!("{head} => {}", pretty4(&Value::Object(r)))

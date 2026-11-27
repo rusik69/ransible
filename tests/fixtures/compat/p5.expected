@@ -1,0 +1,14 @@
+    "msg": [
+        "dir changed=True state=directory mode=0750",
+        "copy changed=True/False mode=0640 size=12 dest_ok=True",
+        "stat exists=True size=12 isreg=True isdir=False mode=0640 sha=2751a3a2f303ad21752038085e2b8c5f98ecff61a2e4ebbd43506a941725be80",
+        "li changed=True msg=line added",
+        "li2 changed=True msg=1 line(s) removed",
+        "cat=['line1', 'line3']",
+        "link changed=True state=link",
+        "find matched=1 files=['f.txt']",
+        "rm changed=True state=absent",
+        "bi changed=True msg=File created",
+        "rep changed=True msg=1 replacements made",
+        "slurp # BEGIN ANSIBLE MANAGED BLOCK\nA\nb\n# END ANSIBLE MANAGED BLOCK enc=base64",
+        "sh rc=3 out=/bin/sh failed=False"

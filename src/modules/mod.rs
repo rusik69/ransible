@@ -126,6 +126,17 @@ pub fn find_src(ctx: &Ctx, kind: &str, name: &str) -> Result<PathBuf> {
 }
 
 pub fn run(module: &str, a: &Args, ctx: &Ctx) -> Result<Res> {
+    // module arguments use underscores; hyphenated spellings (e.g. `daemon-reload`) are aliases
+    let normalized;
+    let a = if a.keys().any(|k| k.contains('-')) {
+        normalized = a
+            .iter()
+            .map(|(k, v)| (k.replace('-', "_"), v.clone()))
+            .collect::<Args>();
+        &normalized
+    } else {
+        a
+    };
     match module {
         "command" | "shell" | "raw" => command(module, a, ctx),
         "script" => script(a, ctx),

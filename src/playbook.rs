@@ -205,6 +205,65 @@ pub fn read_yaml(p: &Path) -> Result<Value> {
 }
 
 /// Parse `k=v k2="v 2"` into a map.
+/// Free-form modules accept a few `key=value` options inside the command string
+/// (`command: php installer.php chdir=/tmp creates=/usr/bin/x`); pull them out as arguments.
+pub fn split_raw_params(module: &str, s: &str) -> Value {
+    const KEYS: &[&str] = &[
+        "creates",
+        "removes",
+        "chdir",
+        "executable",
+        "warn",
+        "stdin",
+        "stdin_add_newline",
+        "strip_empty_ends",
+    ];
+    if !matches!(module, "command" | "shell" | "script" | "raw")
+        || !KEYS.iter().any(|k| s.contains(&format!("{k}=")))
+    {
+        return serde_json::json!({ "_raw_params": s });
+    }
+    // tokenise on whitespace outside quotes, keeping the original text of each token
+    let mut toks: Vec<String> = vec![];
+    let mut cur = String::new();
+    let mut q: Option<char> = None;
+    for c in s.chars() {
+        match (q, c) {
+            (Some(qc), c) if c == qc => {
+                q = None;
+                cur.push(c);
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '"') | (None, '\'') => {
+                q = Some(c);
+                cur.push(c);
+            }
+            (None, c) if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    let mut args = Map::new();
+    let mut rest = vec![];
+    for t in toks {
+        match t.split_once('=') {
+            Some((k, v)) if KEYS.contains(&k) => {
+                let v = v.trim_matches(|c| c == '"' || c == '\'');
+                args.insert(k.to_string(), Value::String(v.to_string()));
+            }
+            _ => rest.push(t),
+        }
+    }
+    args.insert("_raw_params".into(), Value::String(rest.join(" ")));
+    Value::Object(args)
+}
+
 pub fn parse_kv(s: &str) -> Option<Map<String, Value>> {
     let mut out = Map::new();
     let mut cur = String::new();
@@ -358,7 +417,7 @@ pub fn parse_task(v: &Value, dir: &Path) -> Result<Task> {
     t.args = match margs {
         Value::String(s) => {
             if FREEFORM.contains(&t.module.as_str()) {
-                serde_json::json!({ "_raw_params": s })
+                split_raw_params(&t.module, &s)
             } else if let Some(kv) = parse_kv(&s) {
                 Value::Object(kv)
             } else {
@@ -681,4 +740,29 @@ pub fn load_role(name: &str, play_dir: &Path, tasks_from: Option<&str>) -> Resul
         }
     }
     Ok(role)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_params_option_extraction() {
+        let v = split_raw_params(
+            "command",
+            "php installer.php --2 chdir=/tmp creates='/usr/bin/x y'",
+        );
+        assert_eq!(v["_raw_params"], "php installer.php --2");
+        assert_eq!(v["chdir"], "/tmp");
+        assert_eq!(v["creates"], "/usr/bin/x y");
+        // untouched when no option is present, or for other modules
+        assert_eq!(
+            split_raw_params("command", "echo a=b")["_raw_params"],
+            "echo a=b"
+        );
+        assert_eq!(
+            split_raw_params("copy", "x chdir=/")["_raw_params"],
+            "x chdir=/"
+        );
+    }
 }

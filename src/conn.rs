@@ -144,13 +144,13 @@ impl Conn {
     fn command(&self, wrapped: &str) -> Command {
         match &self.kind {
             Kind::Local => {
-                let mut c = Command::new("sh");
+                let mut c = Command::new("/bin/sh");
                 c.arg("-c").arg(wrapped);
                 c
             }
             Kind::Ssh => {
                 let mut c = self.ssh_base();
-                c.arg(format!("sh -c {}", shell_quote(wrapped)));
+                c.arg(format!("/bin/sh -c {}", shell_quote(wrapped)));
                 c
             }
             Kind::Container(rt) => {

@@ -152,6 +152,44 @@ pub(super) fn validate_content(a: &Args, ctx: &Ctx, data: &[u8]) -> Result<Optio
     Ok(None)
 }
 
+/// Add the file attributes Ansible returns from file-writing modules (mode, owner, group, uid, gid, size, state).
+pub(crate) fn add_file_facts(ctx: &Ctx, r: &mut Res, path: &str) {
+    let p = q(path);
+    let Ok(o) = ctx.conn.exec(&format!(
+        "stat -c '%a|%U|%G|%u|%g|%s|%F' {p} 2>/dev/null || stat -f '%Lp|%Su|%Sg|%u|%g|%z|%HT' {p}"
+    )) else {
+        return;
+    };
+    if o.rc != 0 {
+        return;
+    }
+    let f: Vec<&str> = o.stdout.trim().split('|').collect();
+    if f.len() < 7 {
+        return;
+    }
+    r.insert("mode".into(), format!("{:0>4}", f[0]).into());
+    r.insert("owner".into(), f[1].into());
+    r.insert("group".into(), f[2].into());
+    r.insert(
+        "uid".into(),
+        f[3].parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+    );
+    r.insert(
+        "gid".into(),
+        f[4].parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+    );
+    r.insert(
+        "size".into(),
+        f[5].parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+    );
+    let state = match f[6].to_lowercase().as_str() {
+        "directory" => "directory",
+        "symbolic link" => "link",
+        _ => "file",
+    };
+    r.insert("state".into(), state.into());
+}
+
 pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Result<Res> {
     let cur = ctx.conn.get_bytes(dest)?;
     let mut changed = cur.as_deref() != Some(data);
@@ -191,6 +229,14 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
     let ac = apply_attrs(a, ctx, dest)?;
     r.insert("changed".into(), (changed || ac).into());
     r.insert("dest".into(), dest.into());
+    {
+        use sha1::Digest;
+        r.insert(
+            "checksum".into(),
+            hex::encode(sha1::Sha1::digest(data)).into(),
+        );
+    }
+    add_file_facts(ctx, &mut r, dest);
     Ok(r)
 }
 
@@ -314,8 +360,18 @@ pub(super) fn file(a: &Args, ctx: &Ctx) -> Result<Res> {
         false
     };
     let mut r = res(changed || ac);
-    r.insert("path".into(), path.into());
-    r.insert("state".into(), state.into());
+    r.insert("path".into(), path.clone().into());
+    r.insert("state".into(), state.clone().into());
+    if !ctx.check || exists {
+        add_file_facts(ctx, &mut r, &path);
+    }
+    if state == "link" {
+        r.insert("state".into(), "link".into());
+        if let Some(src) = st(a, "src") {
+            r.insert("dest".into(), path.clone().into());
+            r.insert("src".into(), src.into());
+        }
+    }
     Ok(r)
 }
 
@@ -353,6 +409,9 @@ pub(crate) fn write_text(
     }
     let ac = apply_attrs(a, ctx, path)?;
     r.insert("changed".into(), (changed || ac).into());
+    if !ctx.check || old.is_some() {
+        add_file_facts(ctx, &mut r, path);
+    }
     Ok(r)
 }
 
@@ -484,7 +543,18 @@ pub(super) fn blockinfile(a: &Args, ctx: &Ctx) -> Result<Res> {
     if !ls.is_empty() {
         new.push('\n');
     }
-    write_text(a, ctx, &path, old.as_deref(), &new, res(false))
+    let mut r0 = res(false);
+    let msg = if old.is_none() {
+        "File created"
+    } else if old.as_deref() == Some(new.as_str()) {
+        ""
+    } else if absent {
+        "Block removed"
+    } else {
+        "Block inserted"
+    };
+    r0.insert("msg".into(), msg.into());
+    write_text(a, ctx, &path, old.as_deref(), &new, r0)
 }
 
 pub(super) fn replace(a: &Args, ctx: &Ctx) -> Result<Res> {
@@ -494,13 +564,34 @@ pub(super) fn replace(a: &Args, ctx: &Ctx) -> Result<Res> {
         .multi_line(true)
         .build()?;
     let rep = crate::template::py_repl(&st(a, "replace").unwrap_or_default());
+    let count = re.find_iter(&old).count();
     let new = re.replace_all(&old, rep.as_str()).into_owned();
-    write_text(a, ctx, &path, Some(&old), &new, res(false))
+    let mut r0 = res(false);
+    r0.insert(
+        "msg".into(),
+        if new != old && count > 0 {
+            format!("{count} replacements made")
+        } else {
+            String::new()
+        }
+        .into(),
+    );
+    write_text(a, ctx, &path, Some(&old), &new, r0)
 }
 
 pub(super) fn stat(a: &Args, ctx: &Ctx) -> Result<Res> {
     let path = st_any(a, &["path", "dest"]).ok_or_else(|| anyhow!("missing path"))?;
     let p = q(&path);
+    let algo = st(a, "checksum_algorithm").unwrap_or_else(|| "sha1".into());
+    let sum_cmd = match algo.as_str() {
+        "md5" => "md5sum \"$p\" 2>/dev/null || md5 -r \"$p\"",
+        "sha224" => "sha224sum \"$p\" 2>/dev/null || shasum -a 224 \"$p\"",
+        "sha256" => "sha256sum \"$p\" 2>/dev/null || shasum -a 256 \"$p\"",
+        "sha384" => "sha384sum \"$p\" 2>/dev/null || shasum -a 384 \"$p\"",
+        "sha512" => "sha512sum \"$p\" 2>/dev/null || shasum -a 512 \"$p\"",
+        _ => "sha1sum \"$p\" 2>/dev/null || shasum \"$p\"",
+    };
+    let want_sum = bo(a, "get_checksum", true);
     let script = format!(
         r#"p={p}
 if [ -L "$p" ]; then echo islnk=1; echo lnk_source=$(readlink "$p"); else echo islnk=0; fi
@@ -508,20 +599,38 @@ if [ -e "$p" ]; then echo exists=1
 [ -d "$p" ] && echo isdir=1 || echo isdir=0
 [ -f "$p" ] && echo isreg=1 || echo isreg=0
 echo size=$(wc -c < "$p" 2>/dev/null | tr -d ' ')
-echo mode=$(stat -c %a "$p" 2>/dev/null || stat -f %Lp "$p")
-echo pw_name=$(stat -c %U "$p" 2>/dev/null || stat -f %Su "$p")
-echo gr_name=$(stat -c %G "$p" 2>/dev/null || stat -f %Sg "$p")
-echo mtime=$(stat -c %Y "$p" 2>/dev/null || stat -f %m "$p")
-[ -f "$p" ] && echo checksum=$( (sha1sum "$p" 2>/dev/null || shasum "$p") | cut -d' ' -f1)
-else echo exists=0; fi"#
+echo mode=$(stat -L -c %a "$p" 2>/dev/null || stat -L -f %Lp "$p")
+echo pw_name=$(stat -L -c %U "$p" 2>/dev/null || stat -L -f %Su "$p")
+echo gr_name=$(stat -L -c %G "$p" 2>/dev/null || stat -L -f %Sg "$p")
+echo uid=$(stat -L -c %u "$p" 2>/dev/null || stat -L -f %u "$p")
+echo gid=$(stat -L -c %g "$p" 2>/dev/null || stat -L -f %g "$p")
+echo mtime=$(stat -L -c %Y "$p" 2>/dev/null || stat -L -f %m "$p")
+echo atime=$(stat -L -c %X "$p" 2>/dev/null || stat -L -f %a "$p")
+echo ctime=$(stat -L -c %Z "$p" 2>/dev/null || stat -L -f %c "$p")
+echo inode=$(stat -L -c %i "$p" 2>/dev/null || stat -L -f %i "$p")
+echo nlink=$(stat -L -c %h "$p" 2>/dev/null || stat -L -f %l "$p")
+[ -r "$p" ] && echo readable=1 || echo readable=0
+[ -w "$p" ] && echo writeable=1 || echo writeable=0
+[ -x "$p" ] && echo executable=1 || echo executable=0
+{checksum_line}
+else echo exists=0; fi"#,
+        checksum_line = if want_sum {
+            format!("[ -f \"$p\" ] && echo checksum=$( ({sum_cmd}) | cut -d' ' -f1)")
+        } else {
+            String::new()
+        }
     );
     let o = ctx.conn.exec(&script)?;
     let mut s = Map::new();
     for l in o.stdout.lines() {
         if let Some((k, v)) = l.split_once('=') {
             let val = match k {
-                "exists" | "isdir" | "isreg" | "islnk" => Value::Bool(v == "1"),
-                "size" | "mtime" => v.parse::<i64>().map(Value::from).unwrap_or(Value::Null),
+                "exists" | "isdir" | "isreg" | "islnk" | "readable" | "writeable"
+                | "executable" => Value::Bool(v == "1"),
+                "size" | "mtime" | "atime" | "ctime" | "uid" | "gid" | "inode" | "nlink" => {
+                    v.parse::<i64>().map(Value::from).unwrap_or(Value::Null)
+                }
+                "mode" => Value::String(format!("{:0>4}", v)),
                 _ => Value::String(v.to_string()),
             };
             s.insert(k.to_string(), val);
@@ -529,6 +638,12 @@ else echo exists=0; fi"#
     }
     if s.get("exists") != Some(&Value::Bool(true)) {
         s.insert("exists".into(), false.into());
+    } else {
+        s.insert("path".into(), path.clone().into());
+        s.insert("isblk".into(), false.into());
+        s.insert("ischr".into(), false.into());
+        s.insert("isfifo".into(), false.into());
+        s.insert("issock".into(), false.into());
     }
     let mut r = res(false);
     r.insert("stat".into(), Value::Object(s));
@@ -615,7 +730,31 @@ pub(super) fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
     let strip = st(a, "extra_opts").unwrap_or_default();
     ctx.conn.exec(&format!("mkdir -p {}", q(&dest)))?;
     let (data, path);
-    if remote {
+    let is_url =
+        src.starts_with("http://") || src.starts_with("https://") || src.starts_with("ftp://");
+    let mut downloaded: Option<String> = None;
+    if is_url {
+        // remote URL: fetch it onto the target first (like Ansible's unarchive does)
+        let tmp = ctx
+            .conn
+            .exec("mktemp /tmp/.ransible-unarchive.XXXXXX")?
+            .stdout
+            .trim()
+            .to_string();
+        let o = ctx
+            .conn
+            .exec(&format!("curl -fsSL -o {} {}", q(&tmp), q(&src)))?;
+        if o.rc != 0 {
+            let _ = ctx.conn.exec(&format!("rm -f {}", q(&tmp)));
+            return Ok(fail(format!(
+                "Failed to download {src}: {}",
+                o.stderr.trim()
+            )));
+        }
+        data = None;
+        path = tmp.clone();
+        downloaded = Some(tmp);
+    } else if remote {
         data = None;
         path = src.clone();
     } else {
@@ -641,6 +780,9 @@ pub(super) fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
         Some(d) => ctx.conn.exec_stdin(&cmd, &d)?,
         None => ctx.conn.exec(&cmd)?,
     };
+    if let Some(t) = downloaded {
+        let _ = ctx.conn.exec(&format!("rm -f {}", q(&t)));
+    }
     if o.rc != 0 {
         return Ok(fail(o.stderr.trim().to_string()));
     }

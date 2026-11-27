@@ -330,7 +330,8 @@ impl Runner {
         if failed {
             res.insert("failed".into(), true.into());
         } else {
-            res.remove("failed");
+            // Ansible always reports `failed: false` on success
+            res.insert("failed".into(), false.into());
         }
         // facts
         if let Some(Value::Object(f)) = res.get("ansible_facts").cloned() {

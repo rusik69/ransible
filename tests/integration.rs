@@ -393,3 +393,32 @@ fn compat_templates_and_yaml_json_filters_are_byte_identical_to_ansible() {
         assert_eq!(got, want, "rendered file '{f}' differs from real Ansible's");
     }
 }
+
+#[test]
+fn compat_file_module_results_match_ansible() {
+    let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p5");
+    std::fs::create_dir_all("/tmp/ransible-compat-p5").unwrap();
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            "tests/fixtures/compat/p5.yml",
+            "-i",
+            "tests/fixtures/compat/inv.ini",
+        ],
+        "/tmp/ransible-it-compat-p5",
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let got: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('"') && !l.contains("fatal"))
+        .map(|l| l.trim())
+        .collect();
+    let want_s = std::fs::read_to_string("tests/fixtures/compat/p5.expected").unwrap();
+    let want: Vec<&str> = want_s
+        .lines()
+        .filter(|l| l.trim_start().starts_with('"') && !l.contains("fatal"))
+        .map(|l| l.trim())
+        .collect();
+    assert_eq!(got, want);
+    let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p5");
+}

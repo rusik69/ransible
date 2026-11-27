@@ -1,0 +1,49 @@
+- hosts: w1
+  gather_facts: no
+  vars: {wd: /tmp/ransible-compat-p5}
+  tasks:
+    - file: {path: "{{ wd }}/d", state: directory, mode: "0750"}
+      register: r_dir
+    - copy: {content: "line1\nline2\n", dest: "{{ wd }}/d/f.txt", mode: "0640"}
+      register: r_copy
+    - copy: {content: "line1\nline2\n", dest: "{{ wd }}/d/f.txt", mode: "0640"}
+      register: r_copy2
+    - stat: {path: "{{ wd }}/d/f.txt", checksum_algorithm: sha256}
+      register: r_stat
+    - lineinfile: {path: "{{ wd }}/d/f.txt", line: "line3", insertafter: "line1"}
+      register: r_li
+    - lineinfile: {path: "{{ wd }}/d/f.txt", regexp: "^line2", state: absent}
+      register: r_li2
+    - command: cat {{ wd }}/d/f.txt
+      register: r_cat
+      changed_when: false
+    - file: {path: "{{ wd }}/d/link", src: f.txt, state: link}
+      register: r_link
+    - find: {paths: "{{ wd }}/d", patterns: "*.txt"}
+      register: r_find
+    - file: {path: "{{ wd }}/d/f.txt", state: absent}
+      register: r_rm
+    - blockinfile: {path: "{{ wd }}/d/b.txt", block: "a\nb", create: true}
+      register: r_bi
+    - replace: {path: "{{ wd }}/d/b.txt", regexp: "^a$", replace: "A"}
+      register: r_rep
+    - slurp: {src: "{{ wd }}/d/b.txt"}
+      register: r_slurp
+    - shell: echo $0; exit 3
+      register: r_sh
+      failed_when: false
+    - debug:
+        msg:
+          - "dir changed={{ r_dir.changed }} state={{ r_dir.state }} mode={{ r_dir.mode }}"
+          - "copy changed={{ r_copy.changed }}/{{ r_copy2.changed }} mode={{ r_copy.mode }} size={{ r_copy.size }} dest_ok={{ r_copy.dest == wd + '/d/f.txt' }}"
+          - "stat exists={{ r_stat.stat.exists }} size={{ r_stat.stat.size }} isreg={{ r_stat.stat.isreg }} isdir={{ r_stat.stat.isdir }} mode={{ r_stat.stat.mode }} sha={{ r_stat.stat.checksum }}"
+          - "li changed={{ r_li.changed }} msg={{ r_li.msg }}"
+          - "li2 changed={{ r_li2.changed }} msg={{ r_li2.msg }}"
+          - "cat={{ r_cat.stdout_lines }}"
+          - "link changed={{ r_link.changed }} state={{ r_link.state }}"
+          - "find matched={{ r_find.matched }} files={{ r_find.files | map(attribute='path') | map('basename') | sort | list }}"
+          - "rm changed={{ r_rm.changed }} state={{ r_rm.state }}"
+          - "bi changed={{ r_bi.changed }} msg={{ r_bi.msg }}"
+          - "rep changed={{ r_rep.changed }} msg={{ r_rep.msg }}"
+          - "slurp {{ r_slurp.content | b64decode | trim }} enc={{ r_slurp.encoding }}"
+          - "sh rc={{ r_sh.rc }} out={{ r_sh.stdout }} failed={{ r_sh.failed }}"
