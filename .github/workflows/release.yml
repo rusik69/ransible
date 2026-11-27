@@ -64,7 +64,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { path: dist, pattern: ransible-*, merge-multiple: true }
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
