@@ -534,6 +534,23 @@ fn parse_play(m: &Map<String, Value>, dir: &Path) -> Result<Play> {
     Ok(p)
 }
 
+/// Directories searched for `ansible_collections/` (ANSIBLE_COLLECTIONS_PATH, next to the playbook, ~/.ansible/collections).
+pub fn collection_paths(play_dir: &Path) -> Vec<PathBuf> {
+    let mut v = vec![];
+    for k in ["ANSIBLE_COLLECTIONS_PATH", "ANSIBLE_COLLECTIONS_PATHS"] {
+        if let Ok(p) = std::env::var(k) {
+            v.extend(p.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+        }
+    }
+    v.push(play_dir.join("collections"));
+    v.push(play_dir.to_path_buf());
+    if let Ok(h) = std::env::var("HOME") {
+        v.push(Path::new(&h).join(".ansible/collections"));
+    }
+    v.push(PathBuf::from("/usr/share/ansible/collections"));
+    v
+}
+
 pub fn find_role(name: &str, play_dir: &Path) -> Result<PathBuf> {
     if name.contains('/') {
         let p = Path::new(name);
@@ -541,10 +558,24 @@ pub fn find_role(name: &str, play_dir: &Path) -> Result<PathBuf> {
             return Ok(p.to_path_buf());
         }
     }
-    let mut cands = vec![
+    let mut cands = vec![];
+    // role shipped in a collection: namespace.collection.role
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() == 3 {
+        for base in collection_paths(play_dir) {
+            cands.push(
+                base.join("ansible_collections")
+                    .join(parts[0])
+                    .join(parts[1])
+                    .join("roles")
+                    .join(parts[2]),
+            );
+        }
+    }
+    cands.extend([
         play_dir.join("roles").join(name),
         play_dir.join("..").join("roles").join(name),
-    ];
+    ]);
     if let Some(rp) = &crate::config::get().roles_path {
         cands.extend(rp.split(':').map(|d| Path::new(d).join(name)));
     }

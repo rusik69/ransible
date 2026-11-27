@@ -473,14 +473,32 @@ fn run() -> Result<i32> {
             roles_path,
             force,
         } => {
-            if action != "install" {
-                return Err(anyhow!(
-                    "unsupported galaxy action '{action}' (only 'install')"
-                ));
-            }
-            let dest = roles_path.unwrap_or_else(galaxy::default_roles_path);
+            // `galaxy install ...` | `galaxy role install ...` | `galaxy collection install ...`
+            let (kind, mut names) = match action.as_str() {
+                "install" => ("both", names),
+                "role" | "collection" => {
+                    if names.first().map(|s| s.as_str()) != Some("install") {
+                        return Err(anyhow!("usage: galaxy {action} install <names...>"));
+                    }
+                    (action.as_str(), names[1..].to_vec())
+                }
+                other => {
+                    return Err(anyhow!(
+                        "unsupported galaxy action '{other}' (install, role install, collection install)"
+                    ));
+                }
+            };
+            let dest = roles_path
+                .clone()
+                .unwrap_or_else(galaxy::default_roles_path);
             if let Some(f) = role_file {
                 galaxy::install_file(&f, &dest, force)?;
+            }
+            if kind == "collection" {
+                let croot = roles_path.unwrap_or_else(galaxy::default_collections_path);
+                for n in names.drain(..) {
+                    galaxy::install_collection(&n, &croot, force)?;
+                }
             }
             for n in names {
                 let req = galaxy::parse_requirements(&serde_json::json!([n]))
@@ -662,6 +680,7 @@ fn dispatch_args() -> Vec<String> {
         "ansible" => Some("adhoc"),
         "ansible-vault" => Some("vault"),
         "ansible-inventory" => Some("inventory"),
+        "ansible-galaxy" => Some("galaxy"),
         _ => None,
     };
     if let Some(s) = sub {

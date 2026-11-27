@@ -70,7 +70,12 @@ pub fn parse_requirements(v: &Value) -> (Vec<RoleReq>, Vec<String>) {
         .iter()
         .filter_map(|c| match c {
             Value::String(s) => Some(s.clone()),
-            Value::Object(o) => o.get("name").and_then(|n| n.as_str()).map(String::from),
+            Value::Object(o) => o.get("name").and_then(|n| n.as_str()).map(|n| {
+                match o.get("version").and_then(|v| v.as_str()) {
+                    Some(v) if v != "*" => format!("{n}=={v}"),
+                    _ => n.to_string(),
+                }
+            }),
             _ => None,
         })
         .collect();
@@ -177,15 +182,106 @@ pub fn install_role(req: &RoleReq, dest_root: &Path, force: bool) -> Result<Path
     Ok(dest)
 }
 
+/// Install a collection (`namespace.name`, optional `==version`) from galaxy.ansible.com into
+/// `<dest>/ansible_collections/<namespace>/<name>`.
+pub fn install_collection(spec: &str, dest: &Path, force: bool) -> Result<PathBuf> {
+    let (name, version) = match spec.split_once("==") {
+        Some((n, v)) => (n.trim(), Some(v.trim().to_string())),
+        None => (spec.trim(), None),
+    };
+    let (ns, coll) = name
+        .split_once('.')
+        .ok_or_else(|| anyhow!("collection '{name}' must be namespace.name"))?;
+    let target = dest.join("ansible_collections").join(ns).join(coll);
+    if target.exists() {
+        if !force {
+            println!(
+                "- collection {name} is already installed, skipping (use --force to reinstall)."
+            );
+            return Ok(target);
+        }
+        std::fs::remove_dir_all(&target)?;
+    }
+    let base = format!(
+        "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/{ns}/{coll}"
+    );
+    let meta_url = match &version {
+        Some(v) => format!("{base}/versions/{v}/"),
+        None => format!("{base}/"),
+    };
+    let meta: Value = serde_json::from_str(&run(Command::new("curl").args([
+        "-fsSL",
+        "--max-time",
+        "30",
+        &meta_url,
+    ]))?)?;
+    let ver = version
+        .clone()
+        .or_else(|| {
+            meta.pointer("/highest_version/version")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .or_else(|| {
+            meta.get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| anyhow!("could not determine version of {name}"))?;
+    let ver_meta: Value = if version.is_some() {
+        meta
+    } else {
+        serde_json::from_str(&run(Command::new("curl").args([
+            "-fsSL",
+            "--max-time",
+            "30",
+            &format!("{base}/versions/{ver}/"),
+        ]))?)?
+    };
+    let dl = ver_meta
+        .get("download_url")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| anyhow!("no download_url for {name} {ver}"))?;
+    std::fs::create_dir_all(&target)?;
+    let tmp = target.with_extension("download.tar.gz");
+    run(Command::new("curl")
+        .args(["-fsSL", "--max-time", "300", "-o"])
+        .arg(&tmp)
+        .arg(dl))?;
+    let res = run(Command::new("tar")
+        .arg("-xzf")
+        .arg(&tmp)
+        .arg("-C")
+        .arg(&target));
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = res {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(e);
+    }
+    println!(
+        "- collection {name} {ver} was installed successfully ({})",
+        target.display()
+    );
+    Ok(target)
+}
+
+pub fn default_collections_path() -> PathBuf {
+    if let Ok(p) = std::env::var("ANSIBLE_COLLECTIONS_PATH")
+        && let Some(first) = p.split(':').next().filter(|f| !f.is_empty())
+    {
+        return PathBuf::from(first);
+    }
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".ansible/collections")
+}
+
 pub fn install_file(file: &Path, dest_root: &Path, force: bool) -> Result<()> {
     let (roles, colls) = parse_requirements(&read_yaml(file)?);
     for r in &roles {
         install_role(r, dest_root, force)?;
     }
+    let croot = default_collections_path();
     for c in colls {
-        println!(
-            "- collection {c}: skipped (ransible implements the common collection modules natively; Python collection plugins are not executed)"
-        );
+        install_collection(&c, &croot, force)?;
     }
     Ok(())
 }
@@ -217,5 +313,9 @@ mod tests {
         );
         assert_eq!(r2.len(), 1);
         assert_eq!(c2, vec!["community.general", "ansible.posix"]);
+        let (_, c3) = parse_requirements(
+            &json!({"collections": [{"name": "a.b", "version": "1.2.3"}, {"name": "c.d", "version": "*"}]}),
+        );
+        assert_eq!(c3, vec!["a.b==1.2.3", "c.d"]);
     }
 }

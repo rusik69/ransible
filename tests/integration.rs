@@ -230,3 +230,23 @@ fn linear_strategy_keeps_hosts_in_lockstep() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.find("after web1").unwrap() < stdout.find("after web2").unwrap());
 }
+
+#[test]
+fn roles_from_collections_resolve_by_fqcn() {
+    let dir = std::env::temp_dir().join(format!("ransible-coll-{}", std::process::id()));
+    let role = dir.join("collections/ansible_collections/my/coll/roles/web/tasks");
+    std::fs::create_dir_all(&role).unwrap();
+    std::fs::write(
+        role.join("main.yml"),
+        "- debug: msg=\"from collection role\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("site.yml"), "- hosts: localhost\n  connection: local\n  gather_facts: no\n  roles:\n    - my.coll.web\n").unwrap();
+    let (stdout, code) = run(
+        &["playbook", dir.join("site.yml").to_str().unwrap()],
+        "/tmp/ransible-it-11",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("from collection role"), "{stdout}");
+}
