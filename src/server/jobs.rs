@@ -181,6 +181,12 @@ fn prepare(state: &AppState, job_id: i64, params: &Map<String, Value>) -> Result
         }
         _ => {}
     }
+    if let Some(enc) = params.get("secret_vars").and_then(|s| s.as_str())
+        && let Ok(Value::Object(o)) =
+            serde_json::from_str::<Value>(&db::decrypt_secret(&state.master, enc)?)
+    {
+        extra.extend(o);
+    }
     if let Some(cr) = &cred {
         let sec: Map<String, Value> =
             serde_json::from_str(&db::decrypt_secret(&state.master, &s(cr, "secrets"))?)

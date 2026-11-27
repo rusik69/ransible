@@ -2,6 +2,7 @@
 mod cron;
 mod db;
 mod jobs;
+mod survey;
 mod workflows;
 
 use anyhow::{Context, Result, anyhow};
@@ -37,6 +38,67 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Object-level access: does `u` (directly or through a team) hold a grant that satisfies `need`
+    /// ("execute" is satisfied by execute or admin; "admin" only by admin)?
+    pub fn granted(&self, u: &AuthUser, otype: &str, oid: i64, need: &str) -> bool {
+        let Ok(c) = self.db.lock() else { return false };
+        let rows = db::query(
+            &c,
+            "SELECT role FROM grants WHERE object_type = ?1 AND object_id = ?2 AND ((subject_type = 'user' AND subject_id = ?3) OR (subject_type = 'team' AND subject_id IN (SELECT team_id FROM team_members WHERE user_id = ?3)))",
+            &[SqlValue::Text(otype.into()), SqlValue::Integer(oid), SqlValue::Integer(u.id)],
+        )
+        .unwrap_or_default();
+        rows.iter().any(|r| match r["role"].as_str() {
+            Some("admin") => true,
+            Some("execute") => need == "execute",
+            _ => false,
+        })
+    }
+
+    /// Global role OR an object grant. `level` is the global level ("operate" | "write").
+    pub fn allow(&self, u: &AuthUser, level: &str, otype: &str, oid: i64) -> bool {
+        if u.can(level) {
+            return true;
+        }
+        if !GRANTABLE.contains(&otype) {
+            return false;
+        }
+        self.granted(
+            u,
+            otype,
+            oid,
+            if level == "write" { "admin" } else { "execute" },
+        )
+    }
+
+    pub fn job_allowed(&self, u: &AuthUser, job_id: i64) -> bool {
+        if u.can("operate") {
+            return true;
+        }
+        let tid = self
+            .db
+            .lock()
+            .ok()
+            .and_then(|c| db::get(&c, "jobs", job_id).ok().flatten())
+            .and_then(|j| j["template_id"].as_i64());
+        tid.map(|t| self.granted(u, "job_templates", t, "execute"))
+            .unwrap_or(false)
+    }
+
+    pub fn wfjob_allowed(&self, u: &AuthUser, wj_id: i64) -> bool {
+        if u.can("operate") {
+            return true;
+        }
+        let wid = self
+            .db
+            .lock()
+            .ok()
+            .and_then(|c| db::get(&c, "workflow_jobs", wj_id).ok().flatten())
+            .and_then(|j| j["workflow_id"].as_i64());
+        wid.map(|w| self.granted(u, "workflow_templates", w, "execute"))
+            .unwrap_or(false)
+    }
+
     /// Append to the audit trail (activity stream).
     pub fn activity(&self, user: &str, action: &str, otype: &str, oid: i64, summary: &str) {
         if let Ok(c) = self.db.lock() {
@@ -47,6 +109,16 @@ impl AppState {
         }
     }
 }
+
+/// Resource types that object-level grants can apply to.
+const GRANTABLE: [&str; 6] = [
+    "projects",
+    "inventories",
+    "credentials",
+    "job_templates",
+    "workflow_templates",
+    "schedules",
+];
 
 pub struct Options {
     pub listen: String,
@@ -65,8 +137,22 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Error that should reach the client as 400 (e.g. a failed survey validation).
+#[derive(Debug)]
+pub struct UserError(pub String);
+
+impl std::fmt::Display for UserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for UserError {}
+
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(u) = e.downcast_ref::<UserError>() {
+            return ApiError(StatusCode::BAD_REQUEST, u.0.clone());
+        }
         let msg = format!("{e:#}");
         if msg.contains("UNIQUE constraint") {
             return ApiError(
@@ -242,6 +328,8 @@ fn resource(name: &str) -> Option<Res> {
                 "job_type",
                 "become_enabled",
                 "diff_mode",
+                "survey_enabled",
+                "survey_spec",
             ],
             write: "write",
         },
@@ -253,6 +341,22 @@ fn resource(name: &str) -> Option<Res> {
         "workflow_jobs" => Res {
             table: "workflow_jobs",
             cols: &["name", "status", "launched_by", "created"],
+            write: "write",
+        },
+        "teams" => Res {
+            table: "teams",
+            cols: &["name", "description"],
+            write: "write",
+        },
+        "grants" => Res {
+            table: "grants",
+            cols: &[
+                "subject_type",
+                "subject_id",
+                "object_type",
+                "object_id",
+                "role",
+            ],
             write: "write",
         },
         "schedules" => Res {
@@ -351,10 +455,11 @@ fn sanitize(state: &AppState, res: &str, mut row: Map<String, Value>) -> Map<Str
     }
     if res == "jobs" {
         if let Some(Value::String(p)) = row.get("params").cloned() {
-            row.insert(
-                "params".into(),
-                serde_json::from_str(&p).unwrap_or(Value::Null),
-            );
+            let mut parsed: Value = serde_json::from_str(&p).unwrap_or(Value::Null);
+            if parsed.get("secret_vars").is_some() {
+                parsed["secret_vars"] = "$encrypted$".into();
+            }
+            row.insert("params".into(), parsed);
         }
         if let Some(Value::String(p)) = row.get("summary").cloned() {
             row.insert(
@@ -486,6 +591,49 @@ fn prepare_body(
                 return Err(bad("kind must be machine or vault"));
             }
         }
+        "grants" => {
+            let g = |k: &str| {
+                body.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if !["user", "team"].contains(&g("subject_type").as_str()) {
+                return Err(bad("subject_type must be user or team"));
+            }
+            if !GRANTABLE.contains(&g("object_type").as_str()) {
+                return Err(bad(format!(
+                    "object_type must be one of {}",
+                    GRANTABLE.join(", ")
+                )));
+            }
+            if !["execute", "admin"].contains(&g("role").as_str()) {
+                return Err(bad("role must be execute or admin"));
+            }
+            let c = st.db.lock().unwrap();
+            let sub_table = if g("subject_type") == "user" {
+                "users"
+            } else {
+                "teams"
+            };
+            if body
+                .get("subject_id")
+                .and_then(|v| v.as_i64())
+                .and_then(|id| db::get(&c, sub_table, id).ok().flatten())
+                .is_none()
+            {
+                return Err(bad("subject does not exist"));
+            }
+            let otable = resource(&g("object_type")).map(|r| r.table).unwrap_or("");
+            if body
+                .get("object_id")
+                .and_then(|v| v.as_i64())
+                .and_then(|id| db::get(&c, otable, id).ok().flatten())
+                .is_none()
+            {
+                return Err(bad("object does not exist"));
+            }
+        }
         "schedules" => {
             if let Some(c) = body.get("cron").and_then(|c| c.as_str())
                 && !cron::validate(c)
@@ -549,7 +697,19 @@ fn prepare_body(
                 }
                 body.insert("extra_vars".into(), text.into());
             }
-            for k in ["become_enabled", "diff_mode"] {
+            if let Some(sp) = body.get("survey_spec").cloned() {
+                let text = match &sp {
+                    Value::String(s) => s.clone(),
+                    o => o.to_string(),
+                };
+                if !text.trim().is_empty() {
+                    let parsed: Value = serde_json::from_str(&text)
+                        .map_err(|e| bad(format!("survey_spec is not valid JSON: {e}")))?;
+                    survey::validate_spec(&parsed).map_err(bad)?;
+                }
+                body.insert("survey_spec".into(), text.into());
+            }
+            for k in ["become_enabled", "diff_mode", "survey_enabled"] {
                 if let Some(b) = body.get(k).and_then(|b| b.as_bool()) {
                     body.insert(k.into(), (b as i64).into());
                 }
@@ -587,7 +747,11 @@ async fn create_res(
     if name == "users" && !body.contains_key("password") {
         return Err(bad("password is required"));
     }
-    let key = if name == "users" { "username" } else { "name" };
+    let key = match name.as_str() {
+        "users" => "username",
+        "grants" => "role",
+        _ => "name",
+    };
     if body
         .get(key)
         .and_then(|n| n.as_str())
@@ -632,7 +796,9 @@ async fn update_res(
     Json(mut body): Json<Map<String, Value>>,
 ) -> R {
     let res = resource(&name).ok_or_else(not_found)?;
-    if matches!(name.as_str(), "jobs" | "activity_stream" | "workflow_jobs") || !u.can(res.write) {
+    if matches!(name.as_str(), "jobs" | "activity_stream" | "workflow_jobs")
+        || !st.allow(&u, res.write, &name, id)
+    {
         return Err(forbidden());
     }
     let existing = {
@@ -670,7 +836,7 @@ async fn delete_res(
     Path((name, id)): Path<(String, i64)>,
 ) -> R<StatusCode> {
     let res = resource(&name).ok_or_else(not_found)?;
-    if name == "activity_stream" || !u.can(res.write) {
+    if name == "activity_stream" || !st.allow(&u, res.write, &name, id) {
         return Err(forbidden());
     }
     if name == "users" && id == u.id {
@@ -686,6 +852,26 @@ async fn delete_res(
     if name == "workflow_templates" {
         c.execute("DELETE FROM workflow_nodes WHERE workflow_id = ?1", [id])?;
         c.execute("DELETE FROM workflow_edges WHERE workflow_id = ?1", [id])?;
+    }
+    if name == "teams" {
+        c.execute("DELETE FROM team_members WHERE team_id = ?1", [id])?;
+        c.execute(
+            "DELETE FROM grants WHERE subject_type = 'team' AND subject_id = ?1",
+            [id],
+        )?;
+    }
+    if name == "users" {
+        c.execute("DELETE FROM team_members WHERE user_id = ?1", [id])?;
+        c.execute(
+            "DELETE FROM grants WHERE subject_type = 'user' AND subject_id = ?1",
+            [id],
+        )?;
+    }
+    if GRANTABLE.contains(&name.as_str()) {
+        c.execute(
+            "DELETE FROM grants WHERE object_type = ?1 AND object_id = ?2",
+            rusqlite::params![name, id],
+        )?;
     }
     if name == "workflow_jobs" {
         c.execute(
@@ -800,7 +986,7 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> R<StatusCode>
 // ---------- projects / inventories ----------
 
 async fn sync_project(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>) -> R {
-    if !u.can("operate") {
+    if !st.allow(&u, "operate", "projects", id) {
         return Err(forbidden());
     }
     let project = {
@@ -973,7 +1159,36 @@ fn create_job(
     overrides: &Map<String, Value>,
     by: &str,
 ) -> Result<i64> {
-    let params = jobs::resolve_launch(template, overrides);
+    let parse_obj = |v: Option<&Value>| -> Map<String, Value> {
+        match v {
+            Some(Value::Object(o)) => o.clone(),
+            Some(Value::String(t)) if !t.trim().is_empty() => {
+                match crate::playbook::parse_yaml_str(t) {
+                    Ok(Value::Object(o)) => o,
+                    _ => Map::new(),
+                }
+            }
+            _ => Map::new(),
+        }
+    };
+    let base = parse_obj(template.get("extra_vars"));
+    let answers = parse_obj(overrides.get("extra_vars"));
+    let spec: Value =
+        serde_json::from_str(template["survey_spec"].as_str().unwrap_or("")).unwrap_or(Value::Null);
+    let (plain, secrets) = if template["survey_enabled"].as_i64() == Some(1) && spec.is_array() {
+        survey::apply(&spec, &base, &answers).map_err(|m| anyhow::Error::new(UserError(m)))?
+    } else {
+        let mut p = base;
+        p.extend(answers);
+        (p, Map::new())
+    };
+    let mut ov = overrides.clone();
+    ov.insert("extra_vars".into(), Value::Object(plain));
+    let mut params = jobs::resolve_launch(template, &ov);
+    if !secrets.is_empty() {
+        params["secret_vars"] =
+            db::encrypt_secret(&st.master, &Value::Object(secrets).to_string())?.into();
+    }
     let job_type = params["job_type"].as_str().unwrap_or("run").to_string();
     let job_id = {
         let c = st.db.lock().unwrap();
@@ -993,7 +1208,7 @@ async fn launch(
     Path(id): Path<i64>,
     body: axum::body::Bytes,
 ) -> R<(StatusCode, Json<Value>)> {
-    if !u.can("operate") {
+    if !st.allow(&u, "operate", "job_templates", id) {
         return Err(forbidden());
     }
     let overrides: Map<String, Value> = if body.iter().all(|b| b.is_ascii_whitespace()) {
@@ -1034,7 +1249,7 @@ async fn relaunch(
     u: AuthUser,
     Path(id): Path<i64>,
 ) -> R<(StatusCode, Json<Value>)> {
-    if !u.can("operate") {
+    if !st.job_allowed(&u, id) {
         return Err(forbidden());
     }
     let (job,) = {
@@ -1068,7 +1283,7 @@ async fn relaunch(
 }
 
 async fn cancel_job(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>) -> R {
-    if !u.can("operate") {
+    if !st.job_allowed(&u, id) {
         return Err(forbidden());
     }
     let cancel = st.live.lock().unwrap().get(&id).map(|l| l.cancel.clone());
@@ -1189,7 +1404,7 @@ async fn dashboard(State(st): State<AppState>, _u: AuthUser) -> R {
         &[],
     )?;
     Ok(Json(json!({
-        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users"), "schedules": count("schedules"), "workflows": count("workflow_templates")},
+        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users"), "schedules": count("schedules"), "workflows": count("workflow_templates"), "teams": count("teams")},
         "jobs_by_status": by_status,
         "recent_jobs": recent,
     })))
@@ -1220,6 +1435,78 @@ async fn password_change(
         "UPDATE users SET pw_hash = ?1 WHERE id = ?2",
         rusqlite::params![db::hash_password(new), u.id],
     )?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- teams ----------
+
+async fn team_members(State(st): State<AppState>, _u: AuthUser, Path(id): Path<i64>) -> R {
+    let c = st.db.lock().unwrap();
+    db::get(&c, "teams", id)?.ok_or_else(not_found)?;
+    let rows = db::query(
+        &c,
+        "SELECT u.id, u.username, u.role FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = ?1 ORDER BY u.username",
+        &[SqlValue::Integer(id)],
+    )?;
+    Ok(Json(
+        json!({"count": rows.len(), "next": null, "previous": null, "results": rows}),
+    ))
+}
+
+async fn team_add_member(
+    State(st): State<AppState>,
+    u: AuthUser,
+    Path(id): Path<i64>,
+    Json(body): Json<Map<String, Value>>,
+) -> R<StatusCode> {
+    if !u.can("write") {
+        return Err(forbidden());
+    }
+    let uid = body
+        .get("user_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| bad("user_id is required"))?;
+    {
+        let c = st.db.lock().unwrap();
+        db::get(&c, "teams", id)?.ok_or_else(not_found)?;
+        db::get(&c, "users", uid)?.ok_or_else(|| bad("user does not exist"))?;
+        c.execute(
+            "INSERT OR IGNORE INTO team_members (team_id, user_id) VALUES (?1, ?2)",
+            [id, uid],
+        )?;
+    }
+    st.activity(
+        &u.username,
+        "update",
+        "team",
+        id,
+        &format!("added user {uid} to team"),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn team_remove_member(
+    State(st): State<AppState>,
+    u: AuthUser,
+    Path((id, uid)): Path<(i64, i64)>,
+) -> R<StatusCode> {
+    if !u.can("write") {
+        return Err(forbidden());
+    }
+    {
+        let c = st.db.lock().unwrap();
+        c.execute(
+            "DELETE FROM team_members WHERE team_id = ?1 AND user_id = ?2",
+            [id, uid],
+        )?;
+    }
+    st.activity(
+        &u.username,
+        "update",
+        "team",
+        id,
+        &format!("removed user {uid} from team"),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1325,7 +1612,7 @@ async fn workflow_launch(
     u: AuthUser,
     Path(id): Path<i64>,
 ) -> R<(StatusCode, Json<Value>)> {
-    if !u.can("operate") {
+    if !st.allow(&u, "operate", "workflow_templates", id) {
         return Err(forbidden());
     }
     let wf = {
@@ -1364,7 +1651,7 @@ async fn workflow_launch(
 }
 
 async fn workflow_cancel(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>) -> R {
-    if !u.can("operate") {
+    if !st.wfjob_allowed(&u, id) {
         return Err(forbidden());
     }
     let n = st.wf.lock().unwrap().get(&id).cloned();
@@ -1389,7 +1676,7 @@ async fn workflow_decide(
     u: AuthUser,
     Path((id, key, decision)): Path<(i64, String, String)>,
 ) -> R {
-    if !u.can("operate") {
+    if !st.wfjob_allowed(&u, id) {
         return Err(forbidden());
     }
     if decision != "approve" && decision != "deny" {
@@ -1481,6 +1768,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v2/workflow_jobs/{id}/nodes/{key}/{decision}/",
             post(workflow_decide),
+        )
+        .route(
+            "/api/v2/teams/{id}/members/",
+            get(team_members).post(team_add_member),
+        )
+        .route(
+            "/api/v2/teams/{id}/members/{uid}/",
+            axum::routing::delete(team_remove_member),
         )
         .route("/api/v2/{res}/", get(list_res).post(create_res))
         .route(

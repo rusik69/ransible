@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS job_templates (
   extra_vars TEXT NOT NULL DEFAULT '', limit_hosts TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '',
   skip_tags TEXT NOT NULL DEFAULT '', verbosity INTEGER NOT NULL DEFAULT 0, forks INTEGER NOT NULL DEFAULT 5,
   job_type TEXT NOT NULL DEFAULT 'run', become_enabled INTEGER NOT NULL DEFAULT 0, diff_mode INTEGER NOT NULL DEFAULT 0,
+  survey_enabled INTEGER NOT NULL DEFAULT 0, survey_spec TEXT NOT NULL DEFAULT '',
   created TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY, template_id INTEGER, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
@@ -66,6 +67,15 @@ CREATE TABLE IF NOT EXISTS workflow_jobs (
   graph TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS workflow_approvals (
   id INTEGER PRIMARY KEY, workflow_job_id INTEGER NOT NULL, key TEXT NOT NULL, decision TEXT NOT NULL, by_user TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS teams (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS team_members (
+  team_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (team_id, user_id));
+CREATE TABLE IF NOT EXISTS grants (
+  id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id INTEGER NOT NULL,
+  object_type TEXT NOT NULL, object_id INTEGER NOT NULL, role TEXT NOT NULL,
+  UNIQUE (subject_type, subject_id, object_type, object_id));
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 "#;
 
@@ -76,6 +86,14 @@ pub fn open(path: &Path) -> Result<Connection> {
     c.execute_batch(SCHEMA)?;
     // migrations for databases created by older versions
     let _ = c.execute("ALTER TABLE jobs ADD COLUMN workflow_job_id INTEGER", []);
+    let _ = c.execute(
+        "ALTER TABLE job_templates ADD COLUMN survey_enabled INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE job_templates ADD COLUMN survey_spec TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     Ok(c)
 }
 

@@ -80,12 +80,12 @@ const all = async (res) => (await api(`/${res}/?page_size=200`)).results;
 const nameOf = (list, id) => (list.find((x) => x.id === id) || {}).name || '—';
 
 // ---------- shell ----------
-const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['workflows', 'Workflows'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['users', 'Users']];
+const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['workflows', 'Workflows'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['teams', 'Teams'], ['users', 'Users']];
 function shell(route, content) {
   closeLive();
   $app.replaceChildren(h('div', { class: 'layout' },
     h('nav', { class: 'side' }, h('div', { class: 'brand' }, h('i', {}, 'R'), 'Ransible'),
-      NAV.filter(([k]) => !['users', 'notifications'].includes(k) || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
+      NAV.filter(([k]) => !['users', 'teams', 'notifications'].includes(k) || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
       h('div', { class: 'spacer' }), h('div', { class: 'who' }, me.username + ' · ' + me.role),
       h('a', { class: 'nav', href: '#/account' }, 'Account'), h('a', { class: 'nav', href: '#', onclick: (e) => { e.preventDefault(); logout(); } }, 'Sign out')),
     h('main', { class: 'main' }, content)));
@@ -174,12 +174,34 @@ const credentials = crud({ res: 'credentials', title: 'Credentials', single: 'cr
     { name: 'ssh_private_key', label: 'SSH private key (blank = keep)', type: 'textarea', placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----' }, { name: 'password', label: 'SSH password (blank = keep)', type: 'password', half: true }, { name: 'become_password', label: 'Become password (blank = keep)', type: 'password', half: true }, { name: 'vault_password', label: 'Vault password (blank = keep)', type: 'password' }],
   beforeSave: (b) => { const s = {}; for (const k of ['ssh_private_key', 'password', 'become_password', 'vault_password']) { if (b[k]) s[k] = b[k]; delete b[k]; } if (Object.keys(s).length) b.secrets = s; },
   columns: () => [{ title: 'Name', render: (c) => c.name }, { title: 'Type', render: (c) => c.kind }, { title: 'User', render: (c) => c.username || '—' }, { title: 'Secrets', render: (c) => Object.keys(c.secrets || {}).join(', ') || '—' }] });
+const OBJ_TYPES = [['job_templates', 'Job template'], ['workflow_templates', 'Workflow'], ['projects', 'Project'], ['inventories', 'Inventory'], ['credentials', 'Credential'], ['schedules', 'Schedule']];
+async function accessModal(subjectType, subj) {
+  const [grants, ...lists] = await Promise.all([api('/grants/?page_size=200').then((r) => r.results.filter((g) => g.subject_type === subjectType && g.subject_id === subj.id)), ...OBJ_TYPES.map(([t]) => all(t))]);
+  const byType = Object.fromEntries(OBJ_TYPES.map(([t], i) => [t, lists[i]]));
+  const label = (g) => (OBJ_TYPES.find((o) => o[0] === g.object_type) || [0, g.object_type])[1] + ': ' + nameOf(byType[g.object_type] || [], g.object_id);
+  const f = form([{ name: 'object_type', label: 'Object type', type: 'select', options: OBJ_TYPES.map(([v, l]) => ({ value: v, label: l })), half: true }, { name: 'role', label: 'Role', type: 'select', options: [{ value: 'execute', label: 'execute (launch/sync)' }, { value: 'admin', label: 'admin (edit/delete)' }], half: true }, { name: 'object_id', label: 'Object', type: 'select', options: [] }]);
+  const fillObjects = () => { const sel = f.inputs.object_id; sel.replaceChildren(...byType[f.inputs.object_type.value].map((o) => h('option', { value: o.id }, o.name))); };
+  f.inputs.object_type.addEventListener('change', fillObjects); fillObjects();
+  const body = h('div', {}, table([{ title: 'Object', render: (g) => label(g) }, { title: 'Role', render: (g) => g.role }, { title: '', render: (g) => h('button', { class: 'danger', onclick: guard(async () => { await api(`/grants/${g.id}/`, { method: 'DELETE' }); location.reload(); }) }, 'Revoke') }], grants, 'No object access granted.'), h('h2', {}, 'Grant access'), f.el);
+  modal('Access for ' + (subj.name || subj.username), body, (close) => [h('button', { onclick: close }, 'Close'), h('button', { class: 'primary', onclick: guard(async () => { const b = f.get(); b.object_id = Number(b.object_id); await api('/grants/', { method: 'POST', body: { ...b, subject_type: subjectType, subject_id: subj.id } }); close(); toast('Granted'); accessModal(subjectType, subj); }) }, 'Grant')]);
+}
+const teams = crud({ res: 'teams', title: 'Teams', single: 'team', empty: 'Teams group users so you can grant them access to specific templates, projects and more.',
+  defaults: {},
+  fields: () => [{ name: 'name', label: 'Name' }, { name: 'description', label: 'Description' }],
+  columns: () => [{ title: 'Name', render: (t) => t.name }, { title: 'Description', render: (t) => t.description }],
+  extra: (t) => [h('button', { onclick: guard(async () => {
+      const [members, us] = await Promise.all([api(`/teams/${t.id}/members/`).then((r) => r.results), all('users')]);
+      const sel = h('select', {}, us.filter((u) => !members.some((m) => m.id === u.id)).map((u) => h('option', { value: u.id }, u.username)));
+      modal('Members of ' + t.name, h('div', {}, table([{ title: 'User', render: (m) => m.username }, { title: 'Role', render: (m) => m.role }, { title: '', render: (m) => h('button', { class: 'danger', onclick: guard(async () => { await api(`/teams/${t.id}/members/${m.id}/`, { method: 'DELETE' }); toast('Removed'); route(); }) }, 'Remove') }], members, 'No members yet.'), h('h2', {}, 'Add member'), sel),
+        (close) => [h('button', { onclick: close }, 'Close'), h('button', { class: 'primary', onclick: guard(async () => { if (!sel.value) return; await api(`/teams/${t.id}/members/`, { method: 'POST', body: { user_id: Number(sel.value) } }); close(); toast('Added'); route(); }) }, 'Add')]);
+    }) }, 'Members'), h('button', { onclick: guard(() => accessModal('team', t)) }, 'Access')] });
 const users = crud({ res: 'users', title: 'Users', single: 'user', empty: '',
   defaults: { role: 'viewer' },
   toForm: (u) => ({ ...u, password: '' }),
   fields: (_c, row) => [{ name: 'username', label: 'Username' }, { name: 'role', label: 'Role', type: 'select', options: ['viewer', 'operator', 'admin'] }, { name: 'password', label: row ? 'New password (blank = keep)' : 'Password (min 8 chars)', type: 'password' }],
   beforeSave: (b) => { if (!b.password) delete b.password; },
-  columns: () => [{ title: 'Username', render: (u) => u.username }, { title: 'Role', render: (u) => u.role }, { title: 'Created', render: (u) => when(u.created) }] });
+  columns: () => [{ title: 'Username', render: (u) => u.username }, { title: 'Role', render: (u) => u.role }, { title: 'Created', render: (u) => when(u.created) }],
+  extra: (u) => h('button', { onclick: guard(() => accessModal('user', u)) }, 'Access') });
 // ----- workflows -----
 const STATE_COLOR = { successful: 'var(--ok)', failed: 'var(--bad)', denied: 'var(--bad)', running: 'var(--info)', waiting: 'var(--warn)', pending: 'var(--muted)', skipped: 'var(--muted)', canceled: 'var(--muted)' };
 function dag(graph, state, onNode) {
@@ -276,8 +298,9 @@ const templates = async () => {
       { name: 'inventory_id', label: 'Inventory', type: 'select', options: opt(invs, '— select —'), half: true, nullEmpty: true }, { name: 'credential_id', label: 'Credential', type: 'select', options: opt(creds.filter((c) => c.kind === 'machine'), '— none —'), half: true, nullEmpty: true },
       { name: 'vault_credential_id', label: 'Vault credential', type: 'select', options: opt(creds.filter((c) => c.kind === 'vault'), '— none —'), nullEmpty: true },
       { name: 'extra_vars', label: 'Extra variables (YAML/JSON)', type: 'textarea' }, { name: 'limit_hosts', label: 'Limit', half: true }, { name: 'tags', label: 'Tags', half: true },
-      { name: 'job_type', label: 'Job type', type: 'select', options: ['run', 'check'], half: true }, { name: 'forks', label: 'Forks', type: 'number', half: true }, { name: 'become_enabled', label: 'Privilege escalation (become)', type: 'checkbox', half: true }, { name: 'diff_mode', label: 'Show diffs', type: 'checkbox', half: true }],
-      row ? { ...row, become_enabled: !!row.become_enabled, diff_mode: !!row.diff_mode } : { job_type: 'run', forks: 5 });
+      { name: 'job_type', label: 'Job type', type: 'select', options: ['run', 'check'], half: true }, { name: 'forks', label: 'Forks', type: 'number', half: true }, { name: 'become_enabled', label: 'Privilege escalation (become)', type: 'checkbox', half: true }, { name: 'diff_mode', label: 'Show diffs', type: 'checkbox', half: true },
+      { name: 'survey_enabled', label: 'Enable survey (prompt at launch)', type: 'checkbox' }, { name: 'survey_spec', label: 'Survey questions (JSON list: variable, question, type, required, default, choices, min, max)', type: 'textarea', placeholder: '[{"variable":"env","question":"Environment","type":"multiplechoice","choices":["dev","prod"],"default":"dev"}]' }],
+      row ? { ...row, become_enabled: !!row.become_enabled, diff_mode: !!row.diff_mode, survey_enabled: !!row.survey_enabled } : { job_type: 'run', forks: 5 });
     const hint = h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' });
     const pbSel = f.inputs.playbook;
     f.inputs.project_id.addEventListener('change', guard(async () => { const id = f.inputs.project_id.value; if (!id) return; const pbs = await api(`/projects/${id}/playbooks/`); hint.textContent = pbs.length ? 'Playbooks found: ' + pbs.join(', ') : 'No playbooks found — sync the project first.'; if (!pbSel.value && pbs[0]) pbSel.value = pbs[0]; }));
@@ -285,8 +308,20 @@ const templates = async () => {
     modal(row ? 'Edit template' : 'New template', f.el, (close) => [h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: guard(async () => { const body = f.get(); await api(row ? `/job_templates/${row.id}/` : '/job_templates/', { method: row ? 'PUT' : 'POST', body }); close(); toast('Saved'); route(); }) }, 'Save')]);
   };
   const launch = (t) => {
+    let spec = []; if (t.survey_enabled) { try { spec = JSON.parse(t.survey_spec || '[]'); } catch (e) { spec = []; } }
+    const sfields = spec.map((q) => {
+      const ch = Array.isArray(q.choices) ? q.choices : String(q.choices || '').split('\n').filter(Boolean);
+      const base = { name: q.variable, label: (q.question || q.variable) + (q.required ? ' *' : ''), default: q.default };
+      if (q.type === 'multiplechoice') return { ...base, type: 'select', options: ch };
+      if (q.type === 'password') return { ...base, type: 'password' };
+      if (q.type === 'integer' || q.type === 'float') return { ...base, type: 'number' };
+      return base; // text, multiselect (comma separated)
+    });
+    const sf = sfields.length ? form(sfields) : null;
     const f = form([{ name: 'extra_vars', label: 'Extra variables (YAML/JSON)', type: 'textarea', default: t.extra_vars }, { name: 'limit', label: 'Limit', default: t.limit_hosts, half: true }, { name: 'job_type', label: 'Job type', type: 'select', options: ['run', 'check'], default: t.job_type, half: true }]);
-    modal('Launch ' + t.name, f.el, (close) => [h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: guard(async () => { const j = await api(`/job_templates/${t.id}/launch/`, { method: 'POST', body: f.get() }); close(); location.hash = '#/jobs/' + j.id; }) }, 'Launch')]);
+    modal('Launch ' + t.name, h('div', {}, sf && h('div', {}, h('h2', {}, 'Survey'), sf.el), f.el), (close) => [h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: guard(async () => {
+      const body = f.get(); if (sf) { let ev = {}; try { ev = JSON.parse(body.extra_vars || '{}'); } catch (e) { ev = {}; } body.extra_vars = { ...ev, ...sf.get() }; }
+      const j = await api(`/job_templates/${t.id}/launch/`, { method: 'POST', body }); close(); location.hash = '#/jobs/' + j.id; }) }, 'Launch')]);
   };
   shell('templates', [h('div', { class: 'bar' }, h('h1', {}, 'Job templates'), can('write') && h('button', { class: 'primary', onclick: () => edit(null) }, 'New template')),
     table([{ title: 'Name', render: (t) => t.name }, { title: 'Project', render: (t) => nameOf(projs, t.project_id) }, { title: 'Playbook', render: (t) => t.playbook }, { title: 'Inventory', render: (t) => nameOf(invs, t.inventory_id) },
@@ -304,7 +339,7 @@ async function route() {
   try {
     if (!me) me = await api('/me/');
     const [r, arg] = (location.hash.replace(/^#\//, '') || 'dashboard').split('/');
-    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, workflows, wfjob: () => wfJob(arg), schedules, projects, inventories, credentials, notifications, activity, users, account };
+    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, workflows, wfjob: () => wfJob(arg), schedules, projects, inventories, credentials, notifications, activity, teams, users, account };
     await (views[r] || dashboard)();
   } catch (e) { if (token) toast(e.message, true); }
 }

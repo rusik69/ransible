@@ -33,7 +33,9 @@ Open the printed URL. On first start an `admin` user is created (generated passw
 - Lean CLI-only build: `cargo build --release --no-default-features`.
 - **Schedules** (cron, UTC), **notifications** (webhook / Slack on start, success, failure; URL stored encrypted), **activity stream** (audit trail of changes and launches).
 - **Workflows:** DAGs of job templates with success / failure / always edges and approval gates; graph editor and a live status view in the UI; failures handled by a failure edge do not fail the workflow.
-- Not yet: teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
+- **Surveys:** typed launch-time prompts per template (text, password, integer, float, multiple choice/select; required, defaults, ranges). Password answers are stored encrypted and never returned.
+- **Teams and object-level access:** grant a user or team `execute` (launch/sync/cancel) or `admin` (edit/delete) on a specific template, workflow, project, inventory, credential or schedule, on top of the global admin/operator/viewer role. Reads are open to every authenticated user.
+- Not yet: OIDC/LDAP, remote workers, per-object read restrictions (see plan).
 
 ## Platforms
 Release binaries (GitHub Releases, with SHA256SUMS and build provenance): Linux x86_64/aarch64 (glibc and static musl), macOS x86_64/aarch64, Windows x86_64/aarch64 (SSH controller; the `local` connection needs a POSIX `sh`). Targets must pass `make check-targets`.

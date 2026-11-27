@@ -934,3 +934,338 @@ fn workflow_with_failure_path_and_approval() {
         "canceled"
     );
 }
+
+#[test]
+fn survey_validation_and_secret_answers() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start("survey");
+    let tok = j(login(&s, "admin", "admin-password-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let proj_dir = s.dir.join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(proj_dir.join("site.yml"), "- hosts: all\n  gather_facts: no\n  tasks:\n    - debug: msg=\"env={{ env }} n={{ n }}\"\n    - copy: {content: \"{{ pw }}\", dest: \"/tmp/ransible-survey-pw-{{ n }}\"}\n").unwrap();
+    let pid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/projects/",
+        Some(&tok),
+        Some(json!({"name": "p", "local_path": proj_dir.to_str().unwrap()})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let iid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/inventories/",
+        Some(&tok),
+        Some(json!({"name": "i", "content": "localhost ansible_connection=local\n"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let spec = json!([
+        {"variable": "env", "type": "multiplechoice", "choices": ["dev", "prod"], "default": "dev"},
+        {"variable": "n", "type": "integer", "required": true, "min": 1, "max": 100},
+        {"variable": "pw", "type": "password", "required": true}
+    ]);
+    // a malformed spec is rejected
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/job_templates/",
+            Some(&tok),
+            Some(json!({"name": "bad", "survey_spec": "{nope"}))
+        )
+        .0,
+        400
+    );
+    let tid = j(curl(&s, "POST", "/api/v2/job_templates/", Some(&tok), Some(json!({"name": "t", "project_id": pid, "playbook": "site.yml", "inventory_id": iid, "survey_enabled": true, "survey_spec": spec.to_string()}))))["id"].as_i64().unwrap();
+    let launch = |ev: Value| {
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/job_templates/{tid}/launch/"),
+            Some(&tok),
+            Some(json!({"extra_vars": ev})),
+        )
+    };
+    let (c, b) = launch(json!({"pw": "x"}));
+    assert_eq!(c, 400);
+    assert!(b.contains("'n' is required") || b.contains("n"), "{b}");
+    assert_eq!(launch(json!({"n": 1000, "pw": "x"})).0, 400);
+    assert_eq!(launch(json!({"n": 5, "pw": "x", "env": "stage"})).0, 400);
+    let secret = format!("s3cr3t-{}", std::process::id());
+    let (c, b) = launch(json!({"n": 7, "pw": secret}));
+    assert_eq!(c, 201, "{b}");
+    let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(wait_job(&s, &tok, id)["status"], "successful");
+    // defaults applied, answers used, password reached the playbook but is never exposed by the API
+    let out = curl(
+        &s,
+        "GET",
+        &format!("/api/v2/jobs/{id}/stdout/"),
+        Some(&tok),
+        None,
+    )
+    .1;
+    assert!(out.contains("env=dev n=7"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string("/tmp/ransible-survey-pw-7").unwrap_or_default(),
+        secret
+    );
+    let _ = std::fs::remove_file("/tmp/ransible-survey-pw-7");
+    let job = curl(&s, "GET", &format!("/api/v2/jobs/{id}/"), Some(&tok), None).1;
+    assert!(
+        !job.contains(&secret) && job.contains("$encrypted$"),
+        "{job}"
+    );
+    assert!(
+        !curl(
+            &s,
+            "GET",
+            &format!("/api/v2/jobs/{id}/job_events/"),
+            Some(&tok),
+            None
+        )
+        .1
+        .contains(&secret)
+    );
+}
+
+#[test]
+fn teams_and_object_level_grants() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start("rbac");
+    let tok = j(login(&s, "admin", "admin-password-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let proj_dir = s.dir.join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(
+        proj_dir.join("site.yml"),
+        "- hosts: all\n  gather_facts: no\n  tasks:\n    - debug: msg=hi\n",
+    )
+    .unwrap();
+    let pid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/projects/",
+        Some(&tok),
+        Some(json!({"name": "p", "local_path": proj_dir.to_str().unwrap()})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let iid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/inventories/",
+        Some(&tok),
+        Some(json!({"name": "i", "content": "localhost ansible_connection=local\n"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let mk = |n: &str| {
+        j(curl(
+            &s,
+            "POST",
+            "/api/v2/job_templates/",
+            Some(&tok),
+            Some(
+                json!({"name": n, "project_id": pid, "playbook": "site.yml", "inventory_id": iid}),
+            ),
+        ))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (t1, t2) = (mk("t1"), mk("t2"));
+    let uid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/users/",
+        Some(&tok),
+        Some(json!({"username": "v1", "password": "viewer-pass-1", "role": "viewer"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let vt = j(login(&s, "v1", "viewer-pass-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let launch = |t: i64| {
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/job_templates/{t}/launch/"),
+            Some(&vt),
+            None,
+        )
+    };
+
+    // nothing granted yet
+    assert_eq!(launch(t1).0, 403);
+    // only admins manage teams/grants
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/teams/",
+            Some(&vt),
+            Some(json!({"name": "x"}))
+        )
+        .0,
+        403
+    );
+    let team = j(curl(
+        &s,
+        "POST",
+        "/api/v2/teams/",
+        Some(&tok),
+        Some(json!({"name": "ops"})),
+    ));
+    let team_id = team["id"].as_i64().unwrap();
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/teams/{team_id}/members/"),
+            Some(&tok),
+            Some(json!({"user_id": uid}))
+        )
+        .0,
+        204
+    );
+    assert_eq!(
+        j(curl(
+            &s,
+            "GET",
+            &format!("/api/v2/teams/{team_id}/members/"),
+            Some(&tok),
+            None
+        ))["results"][0]["username"],
+        "v1"
+    );
+    // validation
+    for bad in [
+        json!({"subject_type": "team", "subject_id": team_id, "object_type": "users", "object_id": 1, "role": "execute"}),
+        json!({"subject_type": "team", "subject_id": 999, "object_type": "job_templates", "object_id": t1, "role": "execute"}),
+        json!({"subject_type": "team", "subject_id": team_id, "object_type": "job_templates", "object_id": t1, "role": "owner"}),
+    ] {
+        assert_eq!(
+            curl(&s, "POST", "/api/v2/grants/", Some(&tok), Some(bad)).0,
+            400
+        );
+    }
+    // grant the team execute on t1 only
+    let g = j(curl(
+        &s,
+        "POST",
+        "/api/v2/grants/",
+        Some(&tok),
+        Some(
+            json!({"subject_type": "team", "subject_id": team_id, "object_type": "job_templates", "object_id": t1, "role": "execute"}),
+        ),
+    ));
+    let (code, body) = launch(t1);
+    assert_eq!(code, 201, "{body}");
+    let jid = serde_json::from_str::<Value>(&body).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(wait_job(&s, &tok, jid)["status"], "successful");
+    assert_eq!(launch(t2).0, 403);
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/jobs/{jid}/relaunch/"),
+            Some(&vt),
+            None
+        )
+        .0,
+        201
+    );
+    // execute does not allow editing; admin grant on the object does
+    let rename = |t: i64, n: &str| {
+        curl(
+            &s,
+            "PUT",
+            &format!("/api/v2/job_templates/{t}/"),
+            Some(&vt),
+            Some(json!({"name": n})),
+        )
+        .0
+    };
+    assert_eq!(rename(t1, "t1b"), 403);
+    curl(
+        &s,
+        "POST",
+        "/api/v2/grants/",
+        Some(&tok),
+        Some(
+            json!({"subject_type": "user", "subject_id": uid, "object_type": "job_templates", "object_id": t1, "role": "admin"}),
+        ),
+    );
+    assert_eq!(rename(t1, "t1b"), 200);
+    assert_eq!(rename(t2, "t2b"), 403);
+    assert_eq!(
+        curl(
+            &s,
+            "DELETE",
+            &format!("/api/v2/job_templates/{t2}/"),
+            Some(&vt),
+            None
+        )
+        .0,
+        403
+    );
+    // project sync needs a grant on the project
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/projects/{pid}/sync/"),
+            Some(&vt),
+            None
+        )
+        .0,
+        403
+    );
+    // revoking removes access
+    assert_eq!(
+        curl(
+            &s,
+            "DELETE",
+            &format!("/api/v2/grants/{}/", g["id"]),
+            Some(&tok),
+            None
+        )
+        .0,
+        204
+    );
+    let gl = j(curl(&s, "GET", "/api/v2/grants/", Some(&tok), None));
+    assert_eq!(gl["count"], 1); // the user-level admin grant remains
+    // deleting the user cleans up grants and memberships
+    assert_eq!(
+        curl(
+            &s,
+            "DELETE",
+            &format!("/api/v2/users/{uid}/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        204
+    );
+    assert_eq!(
+        j(curl(&s, "GET", "/api/v2/grants/", Some(&tok), None))["count"],
+        0
+    );
+}
