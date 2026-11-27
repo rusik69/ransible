@@ -1,0 +1,20 @@
+
+playbook: p.yml
+
+  play #1 (w1): w1	TAGS: []
+    tasks:
+      debug	TAGS: []
+      debug	TAGS: [base_tag]
+      command	TAGS: []
+      debug	TAGS: [app_tag]
+      include_tasks	TAGS: [app_tag]
+      debug	TAGS: [always]
+      debug	TAGS: []
+      debug	TAGS: []
+      include_role	TAGS: []
+      debug	TAGS: [base_tag]
+      command	TAGS: []
+      debug	TAGS: []
+      include_role	TAGS: []
+      debug	TAGS: [plain]
+      debug	TAGS: []

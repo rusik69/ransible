@@ -1,0 +1,5 @@
+
+playbook: p.yml
+
+  play #1 (w1): w1	TAGS: []
+      TASK TAGS: [always, app_tag, base_tag, never, plain, special]

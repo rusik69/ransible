@@ -514,3 +514,25 @@ fn compat_check_and_diff_mode_output_matches_ansible() {
         let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p7");
     }
 }
+
+#[test]
+fn compat_list_modes_match_ansible() {
+    for f in ["list-tasks", "list-hosts", "list-tags"] {
+        let flag = format!("--{f}");
+        let (stdout, code) = run(
+            &[
+                "playbook",
+                "tests/fixtures/compat/roles1/p.yml",
+                "-i",
+                "tests/fixtures/compat/roles1/inv.ini",
+                &flag,
+            ],
+            "/tmp/ransible-it-list",
+        );
+        assert_eq!(code, 0, "{stdout}");
+        let want =
+            std::fs::read_to_string(format!("tests/fixtures/compat/roles1/expected/{f}.txt"))
+                .unwrap();
+        assert_eq!(stdout, want, "{flag} output differs from real Ansible");
+    }
+}

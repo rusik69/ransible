@@ -1,0 +1,7 @@
+
+playbook: p.yml
+
+  play #1 (w1): w1	TAGS: []
+    pattern: ['w1']
+    hosts (1):
+      w1

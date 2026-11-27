@@ -414,6 +414,7 @@ fn build_runner(c: &Common, dir: &Path) -> Result<executor::Runner> {
         playbook_dir: std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()),
         all_stats: Default::default(),
         started: std::sync::atomic::AtomicBool::new(false),
+        play_no: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 

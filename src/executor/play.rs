@@ -5,27 +5,82 @@ use super::*;
 impl Runner {
     // ---------- plays ----------
 
-    pub(super) fn list_tasks(&self, tasks: &[Task], indent: usize) {
+    /// `--list-tasks`: tasks with their explicit tags; static imports are expanded, dynamic includes are not.
+    pub(super) fn list_tasks(&self, tasks: &[Task], play: &Play, out: &mut Vec<String>, all: bool) {
         for t in tasks {
-            let tags = to_list(t.kw.get("tags"));
-            let tg = if tags.is_empty() {
-                String::new()
-            } else {
-                format!("\tTAGS: [{}]", tags.join(", "))
-            };
             if t.is_block {
-                self.msg(format!("{}block{}", " ".repeat(indent), tg));
-                self.list_tasks(&t.block, indent + 2);
-                self.list_tasks(&t.rescue, indent + 2);
-                self.list_tasks(&t.always, indent + 2);
-            } else if self.selected(t) {
-                self.msg(format!(
-                    "{}{}{}",
-                    " ".repeat(indent),
-                    t.name.clone().unwrap_or_else(|| t.module.clone()),
-                    tg
-                ));
+                self.list_tasks(&t.block, play, out, all);
+                self.list_tasks(&t.rescue, play, out, all);
+                self.list_tasks(&t.always, play, out, all);
+                continue;
             }
+            match t.module.as_str() {
+                "import_tasks" => {
+                    let file = t
+                        .args
+                        .get("file")
+                        .or(t.args.get("_raw_params"))
+                        .map(vstr)
+                        .unwrap_or_default();
+                    let cands = [
+                        t.dir.join("tasks").join(&file),
+                        t.dir.join(&file),
+                        play.dir.join(&file),
+                    ];
+                    if let Some(p) = cands.iter().find(|c| c.is_file())
+                        && let Ok(v) = crate::playbook::read_yaml(p)
+                        && let Ok(mut ts) = crate::playbook::parse_tasks(&v, &t.dir)
+                    {
+                        if let Some(r) = &t.role {
+                            crate::playbook::tag_role(&mut ts, r);
+                        }
+                        apply_inherit(&t.kw, &mut ts);
+                        self.list_tasks(&ts, play, out, all);
+                        continue;
+                    }
+                }
+                "import_role" => {
+                    let name = t.args.get("name").map(vstr).unwrap_or_default();
+                    let tf = t.args.get("tasks_from").map(vstr);
+                    let mut roles = vec![];
+                    let mut seen = HashSet::new();
+                    if self
+                        .load_role_tree(
+                            &name,
+                            &play.dir,
+                            tf.as_deref(),
+                            &Map::new(),
+                            &mut seen,
+                            &mut roles,
+                            true,
+                        )
+                        .is_ok()
+                    {
+                        for (r, _) in roles {
+                            let mut ts = r.tasks.clone();
+                            apply_inherit(&t.kw, &mut ts);
+                            self.list_tasks(&ts, play, out, all);
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if !all && !self.selected(t) {
+                continue;
+            }
+            let mut tags: Vec<String> = to_list(t.kw.get("tags"))
+                .into_iter()
+                .filter(|x| t.role.as_deref() != Some(x.as_str()))
+                .collect();
+            tags.sort();
+            tags.dedup();
+            let name = match (&t.name, &t.role) {
+                (Some(n), Some(r)) => format!("{r} : {n}"),
+                (Some(n), None) => n.clone(),
+                (None, _) => t.module.clone(),
+            };
+            out.push(format!("      {name}\tTAGS: [{}]", tags.join(", ")));
         }
     }
 
@@ -120,46 +175,56 @@ impl Runner {
                 }
             }
         }
-        if self.opts.list_hosts {
+        if self.opts.list_hosts || self.opts.list_tags || self.opts.list_tasks {
+            let no = self
+                .play_no
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            let mut ptags = to_list(play.kw.get("tags"));
+            ptags.sort();
             self.msg(format!(
-                "  play #{} ({}): {}\tTAGS: []\n    pattern: [{:?}]\n    hosts ({}):",
-                1,
-                play.name,
-                play.name,
+                "\n  play #{no} ({}): {}\tTAGS: [{}]",
                 play.hosts,
-                names.len()
+                play.name,
+                ptags.join(", ")
             ));
-            for n in &names {
-                self.msg(format!("      {n}"));
+            if self.opts.list_hosts {
+                self.msg(format!(
+                    "    pattern: ['{}']\n    hosts ({}):",
+                    play.hosts,
+                    names.len()
+                ));
+                for n in &names {
+                    self.msg(format!("      {n}"));
+                }
+                return Ok(true);
             }
-            return Ok(true);
-        }
-        if self.opts.list_tags {
-            let mut tags = std::collections::BTreeSet::new();
-            fn collect(ts: &[Task], out: &mut std::collections::BTreeSet<String>) {
-                for t in ts {
-                    out.extend(to_list(t.kw.get("tags")));
-                    collect(&t.block, out);
-                    collect(&t.rescue, out);
-                    collect(&t.always, out);
+            let mut lines = vec![];
+            for l in [&play.pre_tasks, &role_tasks, &play.tasks, &play.post_tasks] {
+                self.list_tasks(l, play, &mut lines, self.opts.list_tags);
+            }
+            if self.opts.list_tags {
+                let mut tags = std::collections::BTreeSet::new();
+                for l in &lines {
+                    if let Some(t) = l.split("TAGS: [").nth(1) {
+                        tags.extend(
+                            t.trim_end_matches(']')
+                                .split(", ")
+                                .filter(|x| !x.is_empty())
+                                .map(String::from),
+                        );
+                    }
+                }
+                self.msg(format!(
+                    "      TASK TAGS: [{}]",
+                    tags.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            } else {
+                self.msg("    tasks:".to_string());
+                for l in lines {
+                    self.msg(l);
                 }
             }
-            for l in [&play.pre_tasks, &role_tasks, &play.tasks, &play.post_tasks] {
-                collect(l, &mut tags);
-            }
-            self.msg(format!(
-                "\n  play: {}\n    TASK TAGS: [{}]",
-                play.name,
-                tags.into_iter().collect::<Vec<_>>().join(", ")
-            ));
-            return Ok(true);
-        }
-        if self.opts.list_tasks {
-            self.msg(format!("\n  play: {}\n    tasks:", play.name));
-            self.list_tasks(&play.pre_tasks, 6);
-            self.list_tasks(&role_tasks, 6);
-            self.list_tasks(&play.tasks, 6);
-            self.list_tasks(&play.post_tasks, 6);
             return Ok(true);
         }
         self.banner("PLAY", &play.name);

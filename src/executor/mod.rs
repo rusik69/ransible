@@ -67,6 +67,7 @@ pub struct Runner {
     pub playbook_dir: PathBuf,
     pub all_stats: std::sync::Mutex<Vec<(String, Stats)>>,
     pub started: std::sync::atomic::AtomicBool,
+    pub play_no: std::sync::atomic::AtomicUsize,
 }
 
 impl PlayState<'_> {
