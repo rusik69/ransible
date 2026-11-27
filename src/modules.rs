@@ -559,7 +559,7 @@ fn validate_content(a: &Args, ctx: &Ctx, data: &[u8]) -> Result<Option<Res>> {
     }
     let tmp = ctx
         .conn
-        .exec("mktemp /tmp/rancible-validate.XXXXXX")?
+        .exec("mktemp /tmp/ransible-validate.XXXXXX")?
         .stdout
         .trim()
         .to_string();
@@ -599,7 +599,7 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
         if !ctx.check {
             if bo(a, "backup", false) && cur.is_some() {
                 ctx.conn
-                    .exec(&format!("cp -p {p} {p}.rancible.bak", p = q(dest)))?;
+                    .exec(&format!("cp -p {p} {p}.ransible.bak", p = q(dest)))?;
             }
             let o = ctx.conn.exec(&format!("mkdir -p {}", q(&dir_of(dest))))?;
             if o.rc != 0 {
@@ -1705,7 +1705,7 @@ fn get_url(a: &Args, ctx: &Ctx) -> Result<Res> {
     if !exists || bo(a, "force", false) {
         changed = true;
         if !ctx.check {
-            let tmp = format!("{dest}.rancible.tmp");
+            let tmp = format!("{dest}.ransible.tmp");
             let k = if bo(a, "validate_certs", true) {
                 ""
             } else {
@@ -2061,7 +2061,7 @@ fn unarchive(a: &Args, ctx: &Ctx) -> Result<Res> {
             format!("unzip -o -q {} -d {}", q(&path), q(&dest))
         } else {
             format!(
-                "cat > /tmp/.rancible.zip && unzip -o -q /tmp/.rancible.zip -d {} && rm -f /tmp/.rancible.zip",
+                "cat > /tmp/.ransible.zip && unzip -o -q /tmp/.ransible.zip -d {} && rm -f /tmp/.ransible.zip",
                 q(&dest)
             )
         }

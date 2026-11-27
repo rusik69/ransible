@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working on **rancible**: an Ansible-compatible
+Guidance for AI coding agents (and humans) working on **ransible**: an Ansible-compatible
 automation runner in Rust. Goal: run existing Ansible inventories/playbooks/roles unchanged.
 
 ## Layout
@@ -15,7 +15,7 @@ automation runner in Rust. Goal: run existing Ansible inventories/playbooks/role
 
 ## Commands (see `Makefile`)
 - `make check` fmt + clippy (`-D warnings`) + tests. Run before every commit.
-- `make e2e` / `make e2e-case CASE=nginx` run rancible and `ansible-playbook` on fresh
+- `make e2e` / `make e2e-case CASE=nginx` run ransible and `ansible-playbook` on fresh
   podman containers and compare recap, remote state and idempotence. Needs `podman` and `ansible-playbook`.
 - `make security` cargo-audit + cargo-deny.
 

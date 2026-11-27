@@ -55,4 +55,4 @@ check-targets:
 
 # Build a release archive for the host platform into dist/
 dist: release
-	@mkdir -p dist && tar -C target/release -czf dist/rancible-$$(uname -s | tr A-Z a-z)-$$(uname -m).tar.gz rancible && ls -l dist
+	@mkdir -p dist && tar -C target/release -czf dist/ransible-$$(uname -s | tr A-Z a-z)-$$(uname -m).tar.gz ransible && ls -l dist

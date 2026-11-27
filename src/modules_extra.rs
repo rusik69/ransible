@@ -293,7 +293,7 @@ fn reboot(a: &Args, ctx: &Ctx) -> Result<Res> {
         .map(|o| o.stdout.trim().to_string())
     };
     let before = boot()?;
-    let msg = st(a, "msg").unwrap_or_else(|| "Reboot initiated by rancible".into());
+    let msg = st(a, "msg").unwrap_or_else(|| "Reboot initiated by ransible".into());
     let cmd = st(a, "reboot_command").unwrap_or_else(|| format!("shutdown -r now {}", q(&msg)));
     let t = a
         .get("pre_reboot_delay")

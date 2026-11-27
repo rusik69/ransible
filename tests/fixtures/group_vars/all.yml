@@ -1,2 +1,2 @@
-out_dir: "{{ lookup('env', 'RANCIBLE_OUT') | default('/tmp/rancible-test', true) }}"
+out_dir: "{{ lookup('env', 'RANSIBLE_OUT') | default('/tmp/ransible-test', true) }}"
 greeting: hello

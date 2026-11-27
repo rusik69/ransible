@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "rancible",
+    name = "ransible",
     version,
     about = "Ansible-compatible automation runner written in Rust"
 )]
@@ -152,7 +152,7 @@ enum Cmd {
         #[arg(long = "encrypt-vault-id")]
         label: Option<String>,
     },
-    /// Install roles from a requirements file (`rancible galaxy install -r requirements.yml`)
+    /// Install roles from a requirements file (`ransible galaxy install -r requirements.yml`)
     Galaxy {
         /// install
         action: String,
@@ -477,7 +477,7 @@ fn run() -> Result<i32> {
             clap_complete::generate(
                 shell,
                 &mut Cli::command(),
-                "rancible",
+                "ransible",
                 &mut std::io::stdout(),
             );
             Ok(0)

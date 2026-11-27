@@ -2,9 +2,9 @@ use std::process::Command;
 
 fn run(args: &[&str], out: &str) -> (String, i32) {
     let _ = std::fs::remove_dir_all(out);
-    let o = Command::new(env!("CARGO_BIN_EXE_rancible"))
+    let o = Command::new(env!("CARGO_BIN_EXE_ransible"))
         .args(args)
-        .env("RANCIBLE_OUT", out)
+        .env("RANSIBLE_OUT", out)
         .env("NO_COLOR", "1")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -17,7 +17,7 @@ fn run(args: &[&str], out: &str) -> (String, i32) {
 
 #[test]
 fn playbook_roles_blocks_handlers() {
-    let out = "/tmp/rancible-it-1";
+    let out = "/tmp/ransible-it-1";
     let (stdout, code) = run(
         &[
             "playbook",
@@ -41,7 +41,7 @@ fn playbook_roles_blocks_handlers() {
 
 #[test]
 fn yaml_inventory_and_limit() {
-    let out = "/tmp/rancible-it-2";
+    let out = "/tmp/ransible-it-2";
     let (stdout, code) = run(
         &[
             "playbook",
@@ -59,7 +59,7 @@ fn yaml_inventory_and_limit() {
 
 #[test]
 fn tags_and_check_mode() {
-    let out = "/tmp/rancible-it-3";
+    let out = "/tmp/ransible-it-3";
     let (stdout, code) = run(
         &[
             "playbook",
@@ -79,7 +79,7 @@ fn tags_and_check_mode() {
 
 #[test]
 fn failure_sets_exit_code() {
-    let out = "/tmp/rancible-it-4";
+    let out = "/tmp/ransible-it-4";
     let (_s, code) = run(
         &[
             "adhoc",
@@ -107,7 +107,7 @@ fn variable_precedence_matches_ansible() {
             "-e",
             "extra_v=extra",
         ],
-        "/tmp/rancible-it-5",
+        "/tmp/ransible-it-5",
     );
     assert_eq!(code, 0, "{stdout}");
     let got: Vec<String> = stdout
@@ -148,7 +148,7 @@ fn add_host_and_group_by_match_ansible() {
             "-i",
             "tests/fixtures/inventory.ini",
         ],
-        "/tmp/rancible-it-6",
+        "/tmp/ransible-it-6",
     );
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(msgs(&stdout), expected("dyn"));
@@ -163,7 +163,7 @@ fn async_and_rescue_vars_match_ansible() {
             "-i",
             "tests/fixtures/inventory.ini",
         ],
-        "/tmp/rancible-it-7",
+        "/tmp/ransible-it-7",
     );
     assert_eq!(code, 0, "{stdout}");
     let got: Vec<String> = msgs(&stdout)
@@ -181,7 +181,7 @@ fn async_and_rescue_vars_match_ansible() {
 fn filters_match_ansible() {
     let (stdout, code) = run(
         &["playbook", "tests/fixtures/filters.yml"],
-        "/tmp/rancible-it-8",
+        "/tmp/ransible-it-8",
     );
     assert_eq!(code, 0, "{stdout}");
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();

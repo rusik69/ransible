@@ -101,7 +101,7 @@ impl Conn {
             c.args(a.split_whitespace());
         }
         c.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=60s"]);
-        c.args(["-o", "ControlPath=/tmp/rancible-%C"]);
+        c.args(["-o", "ControlPath=/tmp/ransible-%C"]);
         if let Some(p) = self.port {
             c.args(["-p", &p.to_string()]);
         }
@@ -261,7 +261,7 @@ impl Conn {
     pub fn put(&self, path: &str, data: &[u8], mode: Option<&str>) -> Result<()> {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = format!(
-            "{path}.rancible.{}.{}",
+            "{path}.ransible.{}.{}",
             std::process::id(),
             N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );

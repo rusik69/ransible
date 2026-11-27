@@ -39,21 +39,21 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          name=rancible-${{ github.ref_name }}-${{ matrix.target }}
-          mkdir -p dist/$name && cp target/${{ matrix.target }}/release/rancible README.md COMPATIBILITY.md dist/$name/
+          name=ransible-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p dist/$name && cp target/${{ matrix.target }}/release/ransible README.md COMPATIBILITY.md dist/$name/
           tar -C dist -czf dist/$name.tar.gz $name && rm -rf dist/$name
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "rancible-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "ransible-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force dist/$name | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/rancible.exe, README.md, COMPATIBILITY.md dist/$name/
+          Copy-Item target/${{ matrix.target }}/release/ransible.exe, README.md, COMPATIBILITY.md dist/$name/
           Compress-Archive -Path dist/$name -DestinationPath dist/$name.zip
           Remove-Item -Recurse dist/$name
       - uses: actions/upload-artifact@v4
         with:
-          name: rancible-${{ matrix.target }}
+          name: ransible-${{ matrix.target }}
           path: dist/*
   release:
     needs: build
@@ -65,7 +65,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: dist, pattern: rancible-*, merge-multiple: true }
+        with: { path: dist, pattern: ransible-*, merge-multiple: true }
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
       - uses: actions/attest-build-provenance@v2

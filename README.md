@@ -1,14 +1,14 @@
-# rancible
+# ransible
 
 Ansible-compatible automation runner in Rust. Single binary, runs existing Ansible
 inventories, playbooks and roles unchanged. No Python required on controller or targets.
 
 ```
 cargo build --release
-rancible playbook site.yml -i inventory.ini [-l web] [-t tag] [--skip-tags x] [-e k=v|@file] [-C] [-D] [-v] [-f 5]
-rancible playbook site.yml --list-tasks | --list-hosts | --syntax-check
-rancible adhoc web -i inventory -m shell -a 'uptime'
-rancible inventory 'web:&prod' -i inventory
+ransible playbook site.yml -i inventory.ini [-l web] [-t tag] [--skip-tags x] [-e k=v|@file] [-C] [-D] [-v] [-f 5]
+ransible playbook site.yml --list-tasks | --list-hosts | --syntax-check
+ransible adhoc web -i inventory -m shell -a 'uptime'
+ransible inventory 'web:&prod' -i inventory
 ```
 
 ## Supported
@@ -25,7 +25,7 @@ Galaxy collections / non-builtin modules (clear "unsupported module" error), Vau
 Release binaries (GitHub Releases, with SHA256SUMS and build provenance): Linux x86_64/aarch64 (glibc and static musl), macOS x86_64/aarch64, Windows x86_64/aarch64 (SSH controller; the `local` connection needs a POSIX `sh`). Targets must pass `make check-targets`.
 
 ## Vault
-`rancible vault encrypt|decrypt|view|rekey|encrypt_string --vault-password-file pw`; encrypted vars files, `!vault` values and encrypted `copy`/`template` sources are decrypted transparently (`--vault-password-file`, `--ask-vault-pass`, `ANSIBLE_VAULT_PASSWORD_FILE`). Files interoperate with `ansible-vault`.
+`ransible vault encrypt|decrypt|view|rekey|encrypt_string --vault-password-file pw`; encrypted vars files, `!vault` values and encrypted `copy`/`template` sources are decrypted transparently (`--vault-password-file`, `--ask-vault-pass`, `ANSIBLE_VAULT_PASSWORD_FILE`). Files interoperate with `ansible-vault`.
 
 ## Development
 `make check` (fmt, clippy, tests), `make e2e` (differential vs real ansible on podman), `make security` (cargo-audit, cargo-deny). See `AGENTS.md`, `COMPATIBILITY.md`.

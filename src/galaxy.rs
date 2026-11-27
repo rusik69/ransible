@@ -1,4 +1,4 @@
-//! `rancible galaxy install`: install roles from requirements.yml (git sources or galaxy.ansible.com).
+//! `ransible galaxy install`: install roles from requirements.yml (git sources or galaxy.ansible.com).
 use crate::playbook::read_yaml;
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
@@ -184,7 +184,7 @@ pub fn install_file(file: &Path, dest_root: &Path, force: bool) -> Result<()> {
     }
     for c in colls {
         println!(
-            "- collection {c}: skipped (rancible implements the common collection modules natively; Python collection plugins are not executed)"
+            "- collection {c}: skipped (ransible implements the common collection modules natively; Python collection plugins are not executed)"
         );
     }
     Ok(())

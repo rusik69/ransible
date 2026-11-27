@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Differential e2e: run each case with real ansible-playbook and with rancible against
+# Differential e2e: run each case with real ansible-playbook and with ransible against
 # fresh containers; compare recap (changed/failed/unreachable), remote state snapshot and
 # idempotence (second run changed=0).
 #   tests/e2e/run.sh [case ...]       (default: all cases)    STRICT=1 also compares ok/skipped
@@ -7,11 +7,11 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 WORK="$HERE/.work"; mkdir -p "$WORK"
-RANCIBLE="${RANCIBLE:-$ROOT/target/debug/rancible}"
-IMAGE=rancible-target; N=2; BASEPORT=2220
+RANSIBLE="${RANSIBLE:-$ROOT/target/debug/ransible}"
+IMAGE=ransible-target; N=2; BASEPORT=2220
 command -v podman >/dev/null || { echo "podman required"; exit 2; }
 podman info >/dev/null 2>&1 || podman machine start >/dev/null 2>&1
-[ -x "$RANCIBLE" ] || (cd "$ROOT" && cargo build -q) || exit 2
+[ -x "$RANSIBLE" ] || (cd "$ROOT" && cargo build -q) || exit 2
 
 [ -f "$WORK/key" ] || ssh-keygen -q -t ed25519 -N "" -f "$WORK/key"
 if ! podman image exists $IMAGE; then
@@ -48,7 +48,7 @@ run_tool() { # tool case_dir playbook logfile
     if [ "$tool" = ansible ]; then
       ANSIBLE_NOCOLOR=1 ANSIBLE_PIPELINING=True ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$WORK/inventory.ini" "$pb" ${EXTRA:-} > "$log" 2>&1
     else
-      NO_COLOR=1 "$RANCIBLE" playbook "$pb" -i "$WORK/inventory.ini" ${EXTRA:-} > "$log" 2>&1
+      NO_COLOR=1 "$RANSIBLE" playbook "$pb" -i "$WORK/inventory.ini" ${EXTRA:-} > "$log" 2>&1
     fi )
 }
 
@@ -60,7 +60,7 @@ for c in "${cases[@]}"; do
   [ -x "$dir/setup.sh" ] && (cd "$dir" && ./setup.sh >/dev/null 2>&1)
   pb="$(cat "$dir/playbook" 2>/dev/null || echo site.yml)"
   echo "=== case: $c"
-  for tool in ansible rancible; do
+  for tool in ansible ransible; do
     reset
     run_tool $tool "$dir" "$pb" "$WORK/$c.$tool.1.log"
     snapshot "$dir/snapshot.sh" > "$WORK/$c.$tool.snap"
@@ -68,14 +68,14 @@ for c in "${cases[@]}"; do
   done
   ok=1; msgs=""
   for run in 1 2; do
-    a="$(recap "$WORK/$c.ansible.$run.log")"; r="$(recap "$WORK/$c.rancible.$run.log")"
-    if [ -z "$r" ]; then ok=0; msgs+=" run$run:rancible-produced-no-recap($(tail -1 "$WORK/$c.rancible.$run.log" | cut -c1-120))"; continue; fi
+    a="$(recap "$WORK/$c.ansible.$run.log")"; r="$(recap "$WORK/$c.ransible.$run.log")"
+    if [ -z "$r" ]; then ok=0; msgs+=" run$run:ransible-produced-no-recap($(tail -1 "$WORK/$c.ransible.$run.log" | cut -c1-120))"; continue; fi
     cols="3 4 5"; [ "${STRICT:-0}" = 1 ] && cols="2 3 4 5 6"
     for f in $cols; do
       [ "$(field "$a" $f)" = "$(field "$r" $f)" ] || { ok=0; msgs+=" run$run:col$f-differs"; }
     done
   done
-  if ! diff -q "$WORK/$c.ansible.snap" "$WORK/$c.rancible.snap" >/dev/null; then ok=0; msgs+=" snapshot-differs"; fi
+  if ! diff -q "$WORK/$c.ansible.snap" "$WORK/$c.ransible.snap" >/dev/null; then ok=0; msgs+=" snapshot-differs"; fi
   if [ $ok = 1 ]; then summary+=("PASS  $c"); else summary+=("FAIL  $c ($msgs )"); fail=1; fi
 done
 echo; printf '%s\n' "${summary[@]}"
