@@ -533,6 +533,10 @@ fn compat_list_modes_match_ansible() {
         let want =
             std::fs::read_to_string(format!("tests/fixtures/compat/roles1/expected/{f}.txt"))
                 .unwrap();
-        assert_eq!(stdout, want, "{flag} output differs from real Ansible");
+        assert_eq!(
+            stdout.replace("tests/fixtures/compat/roles1/p.yml", "p.yml"),
+            want,
+            "{flag} output differs from real Ansible"
+        );
     }
 }
