@@ -680,11 +680,7 @@ impl Inventory {
                 continue;
             }
             let mut m = Map::new();
-            let hosts = if name == "ungrouped" {
-                self.ordered_hosts(g)
-            } else {
-                self.ordered_hosts(g)
-            };
+            let hosts = self.ordered_hosts(g);
             if !hosts.is_empty() {
                 m.insert(
                     "hosts".into(),
