@@ -190,14 +190,21 @@ impl ConsoleSink {
                 result,
             } => {
                 format!(
-                    "{}\n",
+                    "{}{}\n",
+                    render_diff(result),
                     self.fmt_result(host, status, result, module, item.as_deref(), *ignored)
                 )
             }
             Event::Message { text } => format!("{text}\n"),
             Event::Recap { stats } => {
                 let mut out = self.banner("PLAY RECAP", "", None);
-                let w = stats.iter().map(|s| s.host.len()).max().unwrap_or(0);
+                // Ansible pads host names to 26 columns (longer names are not truncated)
+                let w = stats
+                    .iter()
+                    .map(|s| s.host.len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(26);
                 for s in stats {
                     let c = |code: &str, k: &str, v: u32| {
                         if v > 0 {
@@ -229,6 +236,26 @@ impl Sink for ConsoleSink {
     fn emit(&self, e: &Event) {
         print!("{}", self.render(e));
     }
+}
+
+/// Text of the `diff` entries of a module result (printed before the result line, like Ansible).
+fn render_diff(result: &Value) -> String {
+    let entries: Vec<&Value> = match result.get("diff") {
+        Some(Value::Array(a)) => a.iter().collect(),
+        Some(o @ Value::Object(_)) => vec![o],
+        _ => vec![],
+    };
+    let mut out = String::new();
+    for e in entries {
+        let g = |k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        out.push_str(&crate::pyfmt::unified_diff(
+            g("before"),
+            g("after"),
+            g("before_header"),
+            g("after_header"),
+        ));
+    }
+    out
 }
 
 /// JSON with 4-space indentation (like Ansible's debug output).

@@ -1,0 +1,14 @@
+- hosts: w1
+  gather_facts: no
+  tasks:
+    - lineinfile: {path: /tmp/ransible-compat-p7/f.conf, regexp: '^b=', line: 'b=3'}
+    - copy: {content: "new content\n", dest: /tmp/ransible-compat-p7/g.txt}
+    - copy: {content: "a=1\nb=2\nc=3\n", dest: /tmp/ransible-compat-p7/f.conf}
+    - file: {path: /tmp/ransible-compat-p7/h, state: directory}
+    - command: echo hi
+      register: r
+    - debug: msg="{{ r.changed }} {{ r.skipped | default('n/a') }}"
+    - command: echo hi
+      check_mode: false
+      register: r2
+    - debug: msg="{{ r2.changed }}"

@@ -1,0 +1,21 @@
+TASK [lineinfile]
+changed: [w1]
+TASK [copy]
+changed: [w1]
+TASK [copy]
+changed: [w1]
+TASK [file]
+changed: [w1]
+TASK [command]
+skipping: [w1]
+TASK [debug]
+ok: [w1] => {
+ "msg": "False True"
+}
+TASK [command]
+changed: [w1]
+TASK [debug]
+ok: [w1] => {
+ "msg": true
+}
+w1 ok=7 changed=5 unreachable=0 failed=0 skipped=1 rescued=0 ignored=0

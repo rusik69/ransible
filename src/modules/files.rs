@@ -91,35 +91,15 @@ pub(crate) fn dir_of(p: &str) -> String {
     }
 }
 
-pub(crate) fn unified_diff(old: &str, new: &str, path: &str) -> String {
-    let mut out = format!("--- before: {path}\n+++ after: {path}\n");
-    let (o, n): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
-    let (mut i, mut j) = (0, 0);
-    while i < o.len() || j < n.len() {
-        if i < o.len() && j < n.len() && o[i] == n[j] {
-            i += 1;
-            j += 1;
-        } else if let Some(k) = n[j.min(n.len())..]
-            .iter()
-            .position(|x| i < o.len() && *x == o[i])
-            .filter(|k| *k < 50)
-        {
-            for x in &n[j..j + k] {
-                out.push_str(&format!("+{x}\n"));
-            }
-            j += k;
-        } else {
-            if i < o.len() {
-                out.push_str(&format!("-{}\n", o[i]));
-                i += 1;
-            }
-            if j < n.len() && !(i < o.len() && n[j] == o[i]) {
-                out.push_str(&format!("+{}\n", n[j]));
-                j += 1;
-            }
-        }
-    }
-    out
+/// Ansible-style `diff` entry (rendered by the console callback with --diff).
+pub(crate) fn diff_entry(old: Option<&str>, new: &str, path: &str, with_label: bool) -> Value {
+    let suffix = if with_label { " (content)" } else { "" };
+    serde_json::json!({
+        "before": old.unwrap_or(""),
+        "after": new,
+        "before_header": if old.is_some() { format!("before: {path}{suffix}") } else { format!("before{}", if with_label { suffix.to_string() } else { String::new() }) },
+        "after_header": format!("after: {path}{suffix}"),
+    })
 }
 
 /// Write content to dest if different. Returns result.
@@ -205,7 +185,12 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
                 .unwrap_or_default();
             r.insert(
                 "diff".into(),
-                unified_diff(&old, &String::from_utf8_lossy(data), dest).into(),
+                diff_entry(
+                    cur.as_ref().map(|_| old.as_str()),
+                    &String::from_utf8_lossy(data),
+                    dest,
+                    false,
+                ),
             );
         }
         if !ctx.check {
@@ -289,6 +274,19 @@ pub(super) fn copy(a: &Args, ctx: &Ctx, templ: bool) -> Result<Res> {
     put_content(a, ctx, &dest, &data)
 }
 
+/// `file` module diff: JSON before/after of the path state (what Ansible shows with --diff).
+fn state_diff(path: &str, before: &str, after: &str) -> Value {
+    let j = |st: &str| {
+        crate::pyfmt::json_dumps(
+            &serde_json::json!({"path": path, "state": st}),
+            Some(4),
+            true,
+            true,
+        ) + "\n"
+    };
+    serde_json::json!({"before": j(before), "after": j(after), "before_header": "before", "after_header": "after"})
+}
+
 pub(super) fn file(a: &Args, ctx: &Ctx) -> Result<Res> {
     let path = st_any(a, &["path", "dest", "name"])
         .ok_or_else(|| anyhow!("missing required argument: path"))?;
@@ -316,8 +314,14 @@ pub(super) fn file(a: &Args, ctx: &Ctx) -> Result<Res> {
                 }
             }
             let mut r = res(changed);
-            r.insert("path".into(), path.into());
+            r.insert("path".into(), path.clone().into());
             r.insert("state".into(), "absent".into());
+            if changed && ctx.diff {
+                r.insert(
+                    "diff".into(),
+                    state_diff(&path, if is_dir { "directory" } else { "file" }, "absent"),
+                );
+            }
             return Ok(r);
         }
         "directory" => {
@@ -360,6 +364,24 @@ pub(super) fn file(a: &Args, ctx: &Ctx) -> Result<Res> {
         false
     };
     let mut r = res(changed || ac);
+    if changed
+        && ctx.diff
+        && !exists
+        && matches!(state.as_str(), "directory" | "touch" | "link" | "hard")
+    {
+        r.insert(
+            "diff".into(),
+            state_diff(
+                &path,
+                "absent",
+                if state == "touch" {
+                    "file"
+                } else {
+                    state.as_str()
+                },
+            ),
+        );
+    }
     r.insert("path".into(), path.clone().into());
     r.insert("state".into(), state.clone().into());
     if !ctx.check || exists {
@@ -394,10 +416,7 @@ pub(crate) fn write_text(
     let changed = old != Some(new);
     if changed {
         if ctx.diff {
-            r.insert(
-                "diff".into(),
-                unified_diff(old.unwrap_or(""), new, path).into(),
-            );
+            r.insert("diff".into(), diff_entry(old, new, path, true));
         }
         if !ctx.check {
             ctx.conn.exec(&format!("mkdir -p {}", q(&dir_of(path))))?;

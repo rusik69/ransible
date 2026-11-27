@@ -469,3 +469,48 @@ fn compat_roles_dependencies_includes_and_tags_match_ansible() {
         );
     }
 }
+
+#[test]
+fn compat_check_and_diff_mode_output_matches_ansible() {
+    for (name, flag) in [("check", "-C"), ("diff", "-D")] {
+        let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p7");
+        std::fs::create_dir_all("/tmp/ransible-compat-p7").unwrap();
+        std::fs::write("/tmp/ransible-compat-p7/f.conf", "a=1\nb=2\n").unwrap();
+        let (stdout, code) = run(
+            &[
+                "playbook",
+                "tests/fixtures/compat/p7.yml",
+                "-i",
+                "tests/fixtures/compat/inv.ini",
+                flag,
+            ],
+            "/tmp/ransible-it-compat-p7",
+        );
+        assert_eq!(code, 0, "{stdout}");
+        let norm = |s: &str| -> Vec<String> {
+            s.lines()
+                .filter(|l| {
+                    !l.trim().is_empty() && !l.starts_with("PLAY") && !l.contains("WARNING")
+                })
+                .map(|l| {
+                    l.trim_end_matches('*')
+                        .trim_end()
+                        .replace(" : ok=", " ok=")
+                        .split(' ')
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        };
+        let want =
+            std::fs::read_to_string(format!("tests/fixtures/compat/p7.{name}.expected")).unwrap();
+        // the diff context lines start with a single space; compare them trimmed
+        assert_eq!(
+            norm(&stdout),
+            norm(&want),
+            "{flag} output differs from real Ansible"
+        );
+        let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p7");
+    }
+}

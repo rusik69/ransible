@@ -1,0 +1,46 @@
+TASK [lineinfile]
+--- before: /tmp/ransible-compat-p7/f.conf (content)
++++ after: /tmp/ransible-compat-p7/f.conf (content)
+@@ -1,2 +1,2 @@
+ a=1
+-b=2
++b=3
+changed: [w1]
+TASK [copy]
+--- before
++++ after: /tmp/ransible-compat-p7/g.txt
+@@ -0,0 +1 @@
++new content
+changed: [w1]
+TASK [copy]
+--- before: /tmp/ransible-compat-p7/f.conf
++++ after: /tmp/ransible-compat-p7/f.conf
+@@ -1,2 +1,3 @@
+ a=1
+-b=3
++b=2
++c=3
+changed: [w1]
+TASK [file]
+--- before
++++ after
+@@ -1,4 +1,4 @@
+ {
+ "path": "/tmp/ransible-compat-p7/h",
+- "state": "absent"
++ "state": "directory"
+ }
+changed: [w1]
+TASK [command]
+changed: [w1]
+TASK [debug]
+ok: [w1] => {
+ "msg": "True n/a"
+}
+TASK [command]
+changed: [w1]
+TASK [debug]
+ok: [w1] => {
+ "msg": true
+}
+w1 ok=8 changed=6 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0

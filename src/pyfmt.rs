@@ -126,6 +126,100 @@ pub fn json_dumps(v: &Value, indent: Option<usize>, sort: bool, ascii: bool) -> 
     out
 }
 
+// ---------- unified diff (Python difflib.unified_diff, n=3) ----------
+
+fn lcs_ops(a: &[&str], b: &[&str]) -> Vec<(char, usize, usize)> {
+    // classic DP LCS; inputs are config files, so O(n*m) is fine
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut ops = vec![];
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            ops.push((' ', i, j));
+            i += 1;
+            j += 1;
+        } else if i < n && (j == m || dp[i + 1][j] >= dp[i][j + 1]) {
+            // deletions before insertions, like difflib
+            ops.push(('-', i, j));
+            i += 1;
+        } else {
+            ops.push(('+', i, j));
+            j += 1;
+        }
+    }
+    ops
+}
+
+fn range_unified(start: usize, len: usize) -> String {
+    match len {
+        1 => (start + 1).to_string(),
+        0 => format!("{},0", start),
+        _ => format!("{},{}", start + 1, len),
+    }
+}
+
+/// `difflib.unified_diff(before.splitlines(True), after.splitlines(True), fromfile, tofile)` with 3 lines of context.
+pub fn unified_diff(before: &str, after: &str, from_header: &str, to_header: &str) -> String {
+    let split = |s: &'_ str| -> Vec<String> { s.split_inclusive('\n').map(String::from).collect() };
+    let (bl, al) = (split(before), split(after));
+    let (b, a): (Vec<&str>, Vec<&str>) = (
+        bl.iter().map(|s| s.as_str()).collect(),
+        al.iter().map(|s| s.as_str()).collect(),
+    );
+    let ops = lcs_ops(&b, &a);
+    if ops.iter().all(|o| o.0 == ' ') {
+        return String::new();
+    }
+    let mut out = format!("--- {from_header}\n+++ {to_header}\n");
+    // group ops into hunks with context 3
+    let n = 3usize;
+    let changes: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.0 != ' ')
+        .map(|(i, _)| i)
+        .collect();
+    let mut groups: Vec<(usize, usize)> = vec![];
+    for &c in &changes {
+        let (s, e) = (c.saturating_sub(n), (c + n + 1).min(ops.len()));
+        match groups.last_mut() {
+            Some(g) if s <= g.1 => g.1 = g.1.max(e),
+            _ => groups.push((s, e)),
+        }
+    }
+    for (s, e) in groups {
+        let slice = &ops[s..e];
+        let first = slice[0];
+        let (bstart, astart) = (first.1, first.2);
+        let blen = slice.iter().filter(|o| o.0 != '+').count();
+        let alen = slice.iter().filter(|o| o.0 != '-').count();
+        out.push_str(&format!(
+            "@@ -{} +{} @@\n",
+            range_unified(bstart, blen),
+            range_unified(astart, alen)
+        ));
+        for (tag, i, j) in slice {
+            let line = if *tag == '+' { a[*j] } else { b[*i] };
+            out.push(*tag);
+            out.push_str(line);
+            if !line.ends_with('\n') {
+                out.push_str("\n\\ No newline at end of file\n");
+            }
+        }
+    }
+    out
+}
+
 // ---------- YAML ----------
 
 fn looks_like_other_type(s: &str) -> bool {
@@ -384,6 +478,35 @@ pub fn yaml_dump_opts(v: &Value, indent: usize, sort: bool, leaf_flow: bool) -> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unified_diff_matches_difflib() {
+        assert_eq!(
+            unified_diff("a=1\nb=2\n", "a=1\nb=3\n", "before: f", "after: f"),
+            "--- before: f\n+++ after: f\n@@ -1,2 +1,2 @@\n a=1\n-b=2\n+b=3\n"
+        );
+        assert_eq!(
+            unified_diff("", "new\n", "before", "after: g"),
+            "--- before\n+++ after: g\n@@ -0,0 +1 @@\n+new\n"
+        );
+        assert_eq!(unified_diff("x\n", "x\n", "a", "b"), "");
+        // nearby changes share one hunk, distant ones get separate hunks (as in difflib)
+        let before: String = (1..=10).map(|i| format!("l{i}\n")).collect();
+        let near = before.replace("l2\n", "L2\n").replace("l9\n", "L9\n");
+        assert_eq!(
+            unified_diff(&before, &near, "a", "b")
+                .matches("@@ -")
+                .count(),
+            1
+        );
+        let before: String = (1..=20).map(|i| format!("l{i}\n")).collect();
+        let far = before.replace("l2\n", "L2\n").replace("l18\n", "L18\n");
+        let d = unified_diff(&before, &far, "a", "b");
+        assert!(
+            d.contains("@@ -1,5 +1,5 @@") && d.contains("@@ -15,6 +15,6 @@"),
+            "{d}"
+        );
+    }
 
     #[test]
     fn json_styles() {
