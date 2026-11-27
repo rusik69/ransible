@@ -35,9 +35,38 @@ pub(crate) fn apply_attrs(a: &Args, ctx: &Ctx, path: &str) -> Result<bool> {
     if mode.is_none() && owner.is_none() && grp.is_none() {
         return Ok(false);
     }
+    if bo(a, "recurse", false) {
+        // compare a before/after snapshot of the whole tree to report `changed` accurately
+        let snap = || -> String {
+            let p = q(path);
+            ctx.conn
+                .exec(&format!(
+                    "find {p} -exec stat -c '%n %a %U %G' {{}} + 2>/dev/null || find {p} -exec stat -f '%N %Lp %Su %Sg' {{}} +"
+                ))
+                .map(|o| o.stdout)
+                .unwrap_or_default()
+        };
+        let before = snap();
+        if ctx.check {
+            return Ok(false);
+        }
+        for (cmd, v) in [
+            ("chmod", mode.as_deref()),
+            ("chown", owner.as_deref()),
+            ("chgrp", grp.as_deref()),
+        ] {
+            if let Some(v) = v {
+                let o = ctx.conn.exec(&format!("{cmd} -R {} {}", q(v), q(path)))?;
+                if o.rc != 0 {
+                    bail!("{cmd} failed: {}", o.stderr.trim());
+                }
+            }
+        }
+        return Ok(snap() != before);
+    }
     let cur = attrs(ctx.conn, path);
     let mut changed = false;
-    let rec = if bo(a, "recurse", false) { "-R " } else { "" };
+    let rec = "";
     if let Some(m) = mode {
         let numeric = m.chars().all(|c| c.is_ascii_digit());
         let differs = match (&cur, numeric) {
@@ -121,12 +150,16 @@ pub(super) fn validate_content(a: &Args, ctx: &Ctx, data: &[u8]) -> Result<Optio
     let o = ctx.conn.exec(&v.replace("%s", &q(&tmp)))?;
     let _ = ctx.conn.exec(&format!("rm -f {}", q(&tmp)));
     if o.rc != 0 {
-        let mut r = fail(format!(
-            "failed to validate: rc:{} error:{}",
-            o.rc,
-            o.stderr.trim()
-        ));
+        let mut r = fail("failed to validate");
         r.insert("exit_status".into(), o.rc.into());
+        r.insert("stdout".into(), o.stdout.clone().into());
+        r.insert("stderr".into(), o.stderr.clone().into());
+        for (k, t) in [("stdout_lines", &o.stdout), ("stderr_lines", &o.stderr)] {
+            r.insert(
+                k.into(),
+                t.lines().map(Value::from).collect::<Vec<_>>().into(),
+            );
+        }
         return Ok(Some(r));
     }
     Ok(None)
@@ -170,6 +203,19 @@ pub(crate) fn add_file_facts(ctx: &Ctx, r: &mut Res, path: &str) {
     r.insert("state".into(), state.into());
 }
 
+/// `backup: yes` — copy `dest` to `dest.<pid>.<date>~` like Ansible; returns the backup path.
+pub(crate) fn make_backup(a: &Args, ctx: &Ctx, dest: &str) -> Result<Option<String>> {
+    if !bo(a, "backup", false) || ctx.check {
+        return Ok(None);
+    }
+    let p = q(dest);
+    let o = ctx.conn.exec(&format!(
+        "test -e {p} || exit 0; b={p}.$$.$(date +%Y-%m-%d@%H:%M:%S)~; cp -p {p} \"$b\" && echo \"$b\""
+    ))?;
+    let b = o.stdout.trim().to_string();
+    Ok(if b.is_empty() { None } else { Some(b) })
+}
+
 pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Result<Res> {
     let cur = ctx.conn.get_bytes(dest)?;
     let mut changed = cur.as_deref() != Some(data);
@@ -177,6 +223,7 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
         changed = false;
     }
     let mut r = res(false);
+    let mut backup: Option<String> = None;
     if changed {
         if ctx.diff {
             let old = cur
@@ -194,10 +241,7 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
             );
         }
         if !ctx.check {
-            if bo(a, "backup", false) && cur.is_some() {
-                ctx.conn
-                    .exec(&format!("cp -p {p} {p}.ransible.bak", p = q(dest)))?;
-            }
+            backup = make_backup(a, ctx, dest)?;
             let o = ctx.conn.exec(&format!("mkdir -p {}", q(&dir_of(dest))))?;
             if o.rc != 0 {
                 bail!(
@@ -205,7 +249,12 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
                     o.stderr.trim()
                 );
             }
-            if let Some(f) = validate_content(a, ctx, data)? {
+            if let Some(mut f) = validate_content(a, ctx, data)? {
+                use sha1::Digest;
+                f.insert(
+                    "checksum".into(),
+                    hex::encode(sha1::Sha1::digest(data)).into(),
+                );
                 return Ok(f);
             }
             ctx.conn.put(dest, data, None)?;
@@ -213,6 +262,9 @@ pub(crate) fn put_content(a: &Args, ctx: &Ctx, dest: &str, data: &[u8]) -> Resul
     }
     let ac = apply_attrs(a, ctx, dest)?;
     r.insert("changed".into(), (changed || ac).into());
+    if let Some(b) = backup {
+        r.insert("backup_file".into(), b.into());
+    }
     r.insert("dest".into(), dest.into());
     {
         use sha1::Digest;
@@ -239,6 +291,19 @@ pub(super) fn copy(a: &Args, ctx: &Ctx, templ: bool) -> Result<Res> {
         basename = String::new();
     } else {
         let src = st(a, "src").ok_or_else(|| anyhow!("missing required argument: src"))?;
+        if !templ {
+            let remote = bo(a, "remote_src", false);
+            let is_dir = if remote {
+                ctx.conn.exec(&format!("test -d {}", q(&src)))?.rc == 0
+            } else {
+                find_src(ctx, "files", &src)
+                    .map(|p| p.is_dir())
+                    .unwrap_or(false)
+            };
+            if is_dir {
+                return copy_dir(a, ctx, &src, &dest, remote);
+            }
+        }
         basename = src.rsplit('/').next().unwrap_or("").to_string();
         if templ {
             let p = find_src(ctx, "templates", &src)?;
@@ -249,7 +314,10 @@ pub(super) fn copy(a: &Args, ctx: &Ctx, templ: bool) -> Result<Res> {
                 .or_insert("Ansible managed".into());
             vars.entry("template_path")
                 .or_insert(p.display().to_string().into());
-            data = ctx.templar.render_text(&text, &vars)?.into_bytes();
+            data = ctx
+                .templar
+                .render_template_file(&text, &vars, a)?
+                .into_bytes();
         } else if bo(a, "remote_src", false) {
             data = ctx
                 .conn
@@ -272,6 +340,98 @@ pub(super) fn copy(a: &Args, ctx: &Ctx, templ: bool) -> Result<Res> {
         dest = format!("{}/{}", dest.trim_end_matches('/'), base);
     }
     put_content(a, ctx, &dest, &data)
+}
+
+/// Recursive `copy` of a directory (local or `remote_src`), Ansible semantics: a trailing
+/// slash on `src` copies the contents, otherwise the directory itself lands under `dest`.
+fn copy_dir(a: &Args, ctx: &Ctx, src: &str, dest: &str, remote: bool) -> Result<Res> {
+    let top = if src.ends_with('/') {
+        dest.trim_end_matches('/').to_string()
+    } else {
+        let base = src.rsplit('/').next().unwrap_or("");
+        format!("{}/{}", dest.trim_end_matches('/'), base)
+    };
+    // (relative path, is_dir)
+    let mut entries: Vec<(String, bool)> = vec![];
+    let local_root = if remote {
+        None
+    } else {
+        Some(find_src(ctx, "files", src)?)
+    };
+    if let Some(root) = &local_root {
+        fn walk(dir: &std::path::Path, rel: &str, out: &mut Vec<(String, bool)>) -> Result<()> {
+            let mut names: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+            names.sort_by_key(|e| e.file_name());
+            for e in names {
+                let r = format!("{rel}{}", e.file_name().to_string_lossy());
+                if e.path().is_dir() {
+                    out.push((r.clone(), true));
+                    walk(&e.path(), &format!("{r}/"), out)?;
+                } else {
+                    out.push((r, false));
+                }
+            }
+            Ok(())
+        }
+        walk(root, "", &mut entries)?;
+    } else {
+        let o = ctx.conn.exec(&format!(
+            "cd {} && find . -mindepth 1 \\( -type d -o -type f \\) | sort",
+            q(src)
+        ))?;
+        for l in o.stdout.lines() {
+            let rel = l.trim_start_matches("./").to_string();
+            let d = ctx
+                .conn
+                .exec(&format!("test -d {}/{}", q(src), q(&rel)))?
+                .rc
+                == 0;
+            entries.push((rel, d));
+        }
+    }
+    let mut changed = false;
+    let dmode = st(a, "directory_mode").or_else(|| st(a, "mode"));
+    let mk = |d: &str| -> Result<bool> {
+        let exists = ctx.conn.exec(&format!("test -d {}", q(d)))?.rc == 0;
+        if !exists && !ctx.check {
+            let o = ctx.conn.exec(&format!("mkdir -p {}", q(d)))?;
+            if o.rc != 0 {
+                bail!("{}", o.stderr.trim());
+            }
+        }
+        if let Some(m) = &dmode
+            && !ctx.check
+            && !exists
+        {
+            ctx.conn.exec(&format!("chmod {} {}", q(m), q(d)))?;
+        }
+        Ok(!exists)
+    };
+    changed |= mk(&top)?;
+    for (rel, is_dir) in &entries {
+        let target = format!("{top}/{rel}");
+        if *is_dir {
+            changed |= mk(&target)?;
+            continue;
+        }
+        let data = match &local_root {
+            Some(root) => crate::vault::read_file(&root.join(rel))?,
+            None => ctx
+                .conn
+                .get_bytes(&format!("{}/{}", src.trim_end_matches('/'), rel))?
+                .ok_or_else(|| anyhow!("remote src {src}/{rel} not found"))?,
+        };
+        let r = put_content(a, ctx, &target, &data)?;
+        changed |= r.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    }
+    let mut r = res(changed);
+    r.insert("dest".into(), dest.into());
+    r.insert("src".into(), src.into());
+    r.insert("state".into(), "directory".into());
+    if let Some(m) = dmode {
+        r.insert("mode".into(), m.into());
+    }
+    Ok(r)
 }
 
 /// `file` module diff: JSON before/after of the path state (what Ansible shows with --diff).
@@ -422,6 +582,11 @@ pub(crate) fn write_text(
             ctx.conn.exec(&format!("mkdir -p {}", q(&dir_of(path))))?;
             if let Some(f) = validate_content(a, ctx, new.as_bytes())? {
                 return Ok(f);
+            }
+            if old.is_some()
+                && let Some(b) = make_backup(a, ctx, path)?
+            {
+                r.insert("backup_file".into(), b.into());
             }
             ctx.conn.put(path, new.as_bytes(), None)?;
         }

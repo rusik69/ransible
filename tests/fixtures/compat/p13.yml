@@ -1,0 +1,40 @@
+- hosts: w1
+  gather_facts: no
+  vars: {d: /tmp/ransible-compat-p13}
+  tasks:
+    - file: {path: "{{ d }}", state: absent}
+    - file: {path: "{{ d }}/src/sub", state: directory}
+    - copy: {dest: "{{ d }}/src/a.txt", content: "hello\n"}
+    - copy: {dest: "{{ d }}/src/sub/b.txt", content: "bee\n"}
+    - copy: {src: "{{ d }}/src/", dest: "{{ d }}/dst", remote_src: yes, directory_mode: "0750"}
+      register: r1
+    - copy: {src: "{{ d }}/src/", dest: "{{ d }}/dst", remote_src: yes}
+      register: r2
+    - copy: {dest: "{{ d }}/dst/a.txt", content: "changed\n", force: no}
+      register: r3
+    - copy: {dest: "{{ d }}/dst/a.txt", content: "new\n", backup: yes}
+      register: r4
+    - copy: {dest: "{{ d }}/v.txt", content: "x\n", validate: "false %s"}
+      register: r5
+      ignore_errors: yes
+    - copy: {dest: "{{ d }}/v.txt", content: "x\n", validate: "test -s %s", mode: "0600"}
+      register: r6
+    - file: {path: "{{ d }}/rec", state: directory, mode: "0755"}
+    - file: {path: "{{ d }}/rec/x", state: touch, modification_time: "202001010000.00", access_time: "202001010000.00"}
+      register: r7
+    - file: {path: "{{ d }}/rec", state: directory, recurse: yes, mode: "u=rwX,g=rX,o="}
+      register: r8
+    - file: {src: "{{ d }}/v.txt", dest: "{{ d }}/lnk", state: link}
+      register: r9
+    - file: {src: "{{ d }}/v.txt", dest: "{{ d }}/hl", state: hard}
+      register: r10
+    - file: {path: "{{ d }}/lnk", state: absent}
+      register: r11
+    - template: {src: p13.j2, dest: "{{ d }}/t.out", mode: "0644"}
+      register: r12
+    - template: {src: p13.j2, dest: "{{ d }}/t.out", variable_start_string: "<<", variable_end_string: ">>"}
+      register: r13
+    - template: {src: p13.j2, dest: "{{ d }}/t.out", newline_sequence: "\r\n", backup: yes}
+      register: r14
+    - debug:
+        msg: "{{ [r1.changed, r1.msg|default(''), r1.state|default(''), r1.mode|default(''), r2.changed, r3.changed, r3.msg|default(''), r4.changed, r4.backup_file is defined, r5.failed|default(false), r5.msg|default(''), r6.changed, r6.mode, r7.changed, r7.mtime|default(''), r8.changed, r9.changed, r9.dest|default(''), r10.changed, r11.changed, r12.changed, r12.mode, r13.changed, r14.changed, r14.backup_file is defined] | to_json }}"

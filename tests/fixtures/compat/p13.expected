@@ -1,0 +1,78 @@
+
+PLAY [w1] **********************************************************************
+
+TASK [file] ********************************************************************
+[WARNING]: Host 'w1' is using the discovered Python interpreter at '/opt/homebrew/bin/python3.14', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.21/reference_appendices/interpreter_discovery.html for more information.
+ok: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+ok: [w1]
+
+TASK [copy] ********************************************************************
+ok: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [copy] ********************************************************************
+[ERROR]: Task failed: Module failed: failed to validate
+Origin: /Users/rusik/go/src/github.com/rusik69/rancible/tests/fixtures/compat/p13.yml:17:7
+
+15     - copy: {dest: "{{ d }}/dst/a.txt", content: "new\n", backup: yes}
+16       register: r4
+17     - copy: {dest: "{{ d }}/v.txt", content: "x\n", validate: "false %s"}
+         ^ column 7
+
+fatal: [w1]: FAILED! => {"changed": false, "checksum": "6fcf9dfbd479ed82697fee719b9f8c610a11ff2a", "exit_status": 1, "msg": "failed to validate", "stderr": "", "stderr_lines": [], "stdout": "", "stdout_lines": []}
+...ignoring
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [file] ********************************************************************
+changed: [w1]
+
+TASK [template] ****************************************************************
+changed: [w1]
+
+TASK [template] ****************************************************************
+changed: [w1]
+
+TASK [template] ****************************************************************
+changed: [w1]
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "msg": "[true, \"\", \"directory\", \"0750\", false, false, \"\", true, true, true, \"failed to validate\", true, \"0600\", true, \"\", true, true, \"/tmp/ransible-compat-p13/lnk\", true, true, true, \"0644\", true, true, true]"
+}
+
+PLAY RECAP *********************************************************************
+w1                         : ok=20   changed=15   unreachable=0    failed=0    skipped=0    rescued=0    ignored=1   
+

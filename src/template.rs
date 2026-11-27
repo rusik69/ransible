@@ -960,6 +960,85 @@ impl Templar {
             .map_err(|e| anyhow!("template error: {e:#}"))
     }
 
+    /// Renders a template *file* honouring the `template` module's syntax options
+    /// (`variable_start_string`, `trim_blocks`, `newline_sequence`, ...) and a leading
+    /// `#jinja2: key: value, ...` header line.
+    pub fn render_template_file(
+        &self,
+        s: &str,
+        vars: &Vars,
+        opts: &Map<String, Value>,
+    ) -> Result<String> {
+        let mut o: Map<String, Value> = opts.clone();
+        let mut body = s;
+        if let Some(rest) = s.strip_prefix("#jinja2:") {
+            let (line, tail) = rest.split_once('\n').unwrap_or((rest, ""));
+            for part in line.split(',') {
+                if let Some((k, v)) = part.split_once(':') {
+                    let v = v.trim().trim_matches(['\'', '"']);
+                    let val = match v.to_ascii_lowercase().as_str() {
+                        "true" => Value::Bool(true),
+                        "false" => Value::Bool(false),
+                        _ => Value::String(v.to_string()),
+                    };
+                    o.entry(k.trim().to_string()).or_insert(val);
+                }
+            }
+            body = tail;
+        }
+        let get = |k: &str| o.get(k).and_then(Value::as_str).map(String::from);
+        let flag = |k: &str, d: bool| match o.get(k) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(t)) => parse_bool_str(t).unwrap_or(d),
+            _ => d,
+        };
+        let custom = [
+            "block_start_string",
+            "block_end_string",
+            "variable_start_string",
+            "variable_end_string",
+            "comment_start_string",
+            "comment_end_string",
+            "trim_blocks",
+            "lstrip_blocks",
+            "newline_sequence",
+        ]
+        .iter()
+        .any(|k| o.contains_key(*k));
+        if !custom && body.len() == s.len() {
+            return self.render_text(s, vars);
+        }
+        let mut env = self.env.clone();
+        let mut b = minijinja::syntax::SyntaxConfig::builder();
+        b.trim_blocks(flag("trim_blocks", true))
+            .lstrip_blocks(flag("lstrip_blocks", false))
+            .keep_trailing_newline(true);
+        b.block_delimiters(
+            get("block_start_string").unwrap_or_else(|| "{%".into()),
+            get("block_end_string").unwrap_or_else(|| "%}".into()),
+        );
+        b.variable_delimiters(
+            get("variable_start_string").unwrap_or_else(|| "{{".into()),
+            get("variable_end_string").unwrap_or_else(|| "}}".into()),
+        );
+        b.comment_delimiters(
+            get("comment_start_string").unwrap_or_else(|| "{#".into()),
+            get("comment_end_string").unwrap_or_else(|| "#}".into()),
+        );
+        env.set_syntax(
+            b.build()
+                .map_err(|e| anyhow!("bad template syntax options: {e}"))?,
+        );
+        let _guard = VarsGuard::new(vars);
+        let out = env
+            .render_str(body, Self::ctx(vars))
+            .map_err(|e| anyhow!("template error: {e:#}"))?;
+        Ok(match get("newline_sequence").as_deref() {
+            Some(nl) if nl != "\n" => out.replace('\n', nl),
+            _ => out,
+        })
+    }
+
     pub fn render_value(&self, v: &Value, vars: &Vars) -> Result<Value> {
         Ok(match v {
             Value::String(s) => self.render_str(s, vars)?,
