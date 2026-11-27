@@ -424,6 +424,33 @@ fn compat_file_module_results_match_ansible() {
 }
 
 #[test]
+fn compat_text_edit_modules_match_ansible() {
+    for n in ["p11", "p12"] {
+        let dir = format!("/tmp/ransible-compat-{n}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (stdout, code) = run(
+            &[
+                "playbook",
+                &format!("tests/fixtures/compat/{n}.yml"),
+                "-i",
+                "tests/fixtures/compat/inv.ini",
+            ],
+            &format!("/tmp/ransible-it-compat-{n}"),
+        );
+        assert_eq!(code, 0, "{stdout}");
+        let pick = |t: &str| -> Vec<String> {
+            t.lines()
+                .filter(|l| l.trim_start().starts_with('"') && !l.contains("fatal"))
+                .map(|l| l.trim().to_string())
+                .collect()
+        };
+        let want = std::fs::read_to_string(format!("tests/fixtures/compat/{n}.expected")).unwrap();
+        assert_eq!(pick(&stdout), pick(&want), "{n} differs from real Ansible");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn compat_roles_dependencies_includes_and_tags_match_ansible() {
     let cases: [(&str, &[&str]); 4] = [
         ("all", &[]),

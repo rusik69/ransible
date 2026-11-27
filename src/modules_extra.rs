@@ -52,20 +52,25 @@ fn ok_or_fail(o: crate::conn::Output, what: &str) -> Option<Res> {
 
 // ---------- ini_file ----------
 
-pub fn ini_set(
+/// Edit INI text like Ansible's `ini_file`; returns the new text and Ansible's `msg`.
+/// `values`: the option's value lines (empty = no value). `new_file`: the file did not exist.
+pub fn ini_edit(
     text: &str,
     section: &str,
     option: Option<&str>,
-    value: Option<&str>,
+    values: &[String],
     absent: bool,
     no_extra_spaces: bool,
-) -> String {
+    new_file: bool,
+) -> (String, &'static str) {
     let mut ls: Vec<String> = text.lines().map(String::from).collect();
+    if new_file || (ls.is_empty() && !section.is_empty()) {
+        // Ansible starts a fresh file with a blank line before the first section
+        ls.push(String::new());
+    }
     let is_header = |l: &str| l.trim().starts_with('[') && l.trim().ends_with(']');
     let header_of = |l: &str| l.trim()[1..l.trim().len() - 1].to_string();
-    // section bounds
     let mut start: Option<usize> = if section.is_empty() { Some(0) } else { None };
-    let mut end = ls.len();
     if !section.is_empty() {
         for (i, l) in ls.iter().enumerate() {
             if is_header(l) && header_of(l) == section {
@@ -74,64 +79,98 @@ pub fn ini_set(
             }
         }
     }
-    if let Some(s) = start {
-        for (i, l) in ls.iter().enumerate().skip(s) {
-            if is_header(l) {
-                end = i;
-                break;
-            }
-        }
-    }
+    let end = start
+        .map(|s| {
+            ls.iter()
+                .enumerate()
+                .skip(s)
+                .find(|(_, l)| is_header(l))
+                .map(|(i, _)| i)
+                .unwrap_or(ls.len())
+        })
+        .unwrap_or(ls.len());
+    let line_for = |opt: &str, v: Option<&String>| match v {
+        Some(v) if no_extra_spaces => format!("{opt}={v}"),
+        Some(v) => format!("{opt} = {v}"),
+        None => opt.to_string(),
+    };
+    let msg: &'static str;
     match (option, absent) {
-        (None, true) => {
-            if let (Some(s), false) = (start, section.is_empty()) {
+        (None, true) => match start {
+            Some(s) if !section.is_empty() => {
                 ls.drain(s - 1..end);
+                msg = "section removed";
             }
-        }
+            _ => msg = "OK",
+        },
         (Some(opt), true) => {
+            let mut removed = false;
             if let Some(s) = start {
                 let mut i = s;
-                while i < end.min(ls.len()) {
+                let mut e = end;
+                while i < e.min(ls.len()) {
                     if line_has_option(&ls[i], opt) {
                         ls.remove(i);
-                        end -= 1;
+                        e -= 1;
+                        removed = true;
                     } else {
                         i += 1;
                     }
                 }
             }
+            msg = if removed { "option changed" } else { "OK" };
         }
         (Some(opt), false) => {
-            let newline = match value {
-                Some(v) if no_extra_spaces => format!("{opt}={v}"),
-                Some(v) => format!("{opt} = {v}"),
-                None => opt.to_string(),
+            let wanted: Vec<String> = if values.is_empty() {
+                vec![line_for(opt, None)]
+            } else {
+                values.iter().map(|v| line_for(opt, Some(v))).collect()
             };
             match start {
                 Some(s) => {
-                    if let Some(i) = (s..end.min(ls.len())).find(|&i| line_has_option(&ls[i], opt))
-                    {
-                        ls[i] = newline;
-                    } else {
+                    let existing: Vec<usize> = (s..end.min(ls.len()))
+                        .filter(|&i| line_has_option(&ls[i], opt))
+                        .collect();
+                    if existing.is_empty() {
                         let mut at = end.min(ls.len());
                         while at > s && ls[at - 1].trim().is_empty() {
                             at -= 1;
                         }
-                        ls.insert(at, newline);
+                        for (k, w) in wanted.into_iter().enumerate() {
+                            ls.insert(at + k, w);
+                        }
+                        msg = "option added";
+                    } else {
+                        let cur: Vec<&String> = existing.iter().map(|&i| &ls[i]).collect();
+                        if cur.len() == wanted.len()
+                            && cur.iter().zip(&wanted).all(|(a, b)| a.trim() == b.trim())
+                        {
+                            msg = "OK";
+                        } else {
+                            let at = existing[0];
+                            for &i in existing.iter().rev() {
+                                ls.remove(i);
+                            }
+                            for (k, w) in wanted.into_iter().enumerate() {
+                                ls.insert(at + k, w);
+                            }
+                            msg = "option changed";
+                        }
                     }
                 }
                 None => {
-                    if !ls.is_empty() && !ls.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
-                        ls.push(String::new());
-                    }
                     ls.push(format!("[{section}]"));
-                    ls.push(newline);
+                    ls.extend(wanted);
+                    msg = "section and option added";
                 }
             }
         }
         (None, false) => {
             if start.is_none() {
                 ls.push(format!("[{section}]"));
+                msg = "section added";
+            } else {
+                msg = "OK";
             }
         }
     }
@@ -139,7 +178,20 @@ pub fn ini_set(
     if !ls.is_empty() {
         out.push('\n');
     }
-    out
+    (out, msg)
+}
+
+#[cfg(test)]
+pub fn ini_set(
+    text: &str,
+    section: &str,
+    option: Option<&str>,
+    value: Option<&str>,
+    absent: bool,
+    no_extra_spaces: bool,
+) -> String {
+    let vals: Vec<String> = value.map(|v| vec![v.to_string()]).unwrap_or_default();
+    ini_edit(text, section, option, &vals, absent, no_extra_spaces, false).0
 }
 
 fn line_has_option(l: &str, opt: &str) -> bool {
@@ -155,22 +207,44 @@ fn ini_file(a: &Args, ctx: &Ctx) -> Result<Res> {
     let path = st(a, "path")
         .or_else(|| st(a, "dest"))
         .ok_or_else(|| anyhow!("missing path"))?;
-    let old = read_text(ctx, &path, bo(a, "create", false) || true)?;
+    let create = bo(a, "create", true);
+    let old = read_text(ctx, &path, true)?;
+    if old.is_none() && !create {
+        return Ok(fail(format!("Destination {path} does not exist!")));
+    }
     let text = old.clone().unwrap_or_default();
     let absent = st(a, "state").as_deref() == Some("absent");
-    let value = a.get("value").filter(|v| !v.is_null()).map(|v| match v {
+    let as_s = |v: &Value| match v {
         Value::String(s) => s.clone(),
         o => o.to_string(),
-    });
-    let new = ini_set(
+    };
+    let mut values: Vec<String> = match a.get("values") {
+        Some(Value::Array(v)) => v.iter().map(as_s).collect(),
+        _ => vec![],
+    };
+    if values.is_empty()
+        && let Some(v) = a.get("value").filter(|v| !v.is_null())
+    {
+        values.push(as_s(v));
+    }
+    let option = st(a, "option");
+    if !absent && option.is_some() && values.is_empty() && !bo(a, "allow_no_value", false) {
+        return Ok(fail(
+            "Parameter 'value(s)' must be defined if state=present and allow_no_value=False.",
+        ));
+    }
+    let (new, msg) = ini_edit(
         &text,
         &st(a, "section").unwrap_or_default(),
-        st(a, "option").as_deref(),
-        value.as_deref(),
+        option.as_deref(),
+        &values,
         absent,
         bo(a, "no_extra_spaces", false),
+        old.is_none(),
     );
-    write_text(a, ctx, &path, old.as_deref(), &new, res(false))
+    let mut r0 = res(false);
+    r0.insert("msg".into(), msg.into());
+    write_text(a, ctx, &path, old.as_deref(), &new, r0)
 }
 
 // ---------- sysctl ----------
@@ -982,7 +1056,7 @@ mod tests {
     #[test]
     fn ini_adds_section_and_option() {
         let out = ini_set("[a]\nx = 1\n", "b", Some("y"), Some("2"), false, false);
-        assert_eq!(out, "[a]\nx = 1\n\n[b]\ny = 2\n");
+        assert_eq!(out, "[a]\nx = 1\n[b]\ny = 2\n");
     }
 
     #[test]

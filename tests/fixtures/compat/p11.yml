@@ -1,0 +1,79 @@
+- hosts: w1
+  gather_facts: no
+  vars: {d: /tmp/ransible-compat-p11}
+  tasks:
+    - file: {path: "{{ d }}", state: directory}
+    - copy:
+        dest: "{{ d }}/a.conf"
+        content: |
+          # header
+          alpha=1
+          beta=2
+          [section]
+          gamma=3
+          # tail
+    - lineinfile: {path: "{{ d }}/a.conf", regexp: '^beta=', line: 'beta=22', backup: no}
+      register: l1
+    - lineinfile: {path: "{{ d }}/a.conf", line: 'new_after_alpha', insertafter: '^alpha='}
+      register: l2
+    - lineinfile: {path: "{{ d }}/a.conf", line: 'before_section', insertbefore: '^\[section\]'}
+      register: l3
+    - lineinfile: {path: "{{ d }}/a.conf", regexp: '^(gamma)=(\d)', line: '\1:\2', backrefs: yes}
+      register: l4
+    - lineinfile: {path: "{{ d }}/a.conf", regexp: '^nomatch=', line: 'x=1', backrefs: yes}
+      register: l5
+    - lineinfile: {path: "{{ d }}/a.conf", line: 'at_bof', insertbefore: BOF}
+      register: l6
+    - lineinfile: {path: "{{ d }}/a.conf", line: 'at_eof', insertafter: EOF}
+      register: l7
+    - lineinfile: {path: "{{ d }}/a.conf", regexp: '^# tail', state: absent}
+      register: l8
+    - lineinfile: {path: "{{ d }}/a.conf", line: 'at_eof'}
+      register: l9
+    - lineinfile: {path: "{{ d }}/new.conf", line: 'first', create: yes}
+      register: l10
+    - blockinfile:
+        path: "{{ d }}/a.conf"
+        block: |
+          b1
+          b2
+        marker: "# {mark} MANAGED"
+        insertafter: '^beta='
+      register: b1
+    - blockinfile:
+        path: "{{ d }}/a.conf"
+        block: |
+          b1
+          b2
+        marker: "# {mark} MANAGED"
+      register: b2
+    - blockinfile:
+        path: "{{ d }}/a.conf"
+        marker: "# {mark} MANAGED"
+        state: absent
+      register: b3
+    - replace: {path: "{{ d }}/a.conf", regexp: '(alpha)=(\d)', replace: '\1 = \2'}
+      register: r1
+    - replace: {path: "{{ d }}/a.conf", regexp: '^at_', replace: 'AT_', after: 'beta', before: 'at_eof'}
+      register: r2
+    - ini_file: {path: "{{ d }}/b.ini", section: s1, option: k, value: v, create: yes}
+      register: i1
+    - ini_file: {path: "{{ d }}/b.ini", section: s1, option: k, value: v}
+      register: i2
+    - ini_file: {path: "{{ d }}/b.ini", section: s2, option: n, value: 5, no_extra_spaces: yes}
+      register: i3
+    - ini_file: {path: "{{ d }}/b.ini", section: s1, option: k, state: absent}
+      register: i4
+    - slurp: {src: "{{ d }}/a.conf"}
+      register: sa
+    - slurp: {src: "{{ d }}/b.ini"}
+      register: sb
+    - debug:
+        msg:
+          - "{{ [l1,l2,l3,l4,l5,l6,l7,l8,l9,l10] | map(attribute='changed') | list }}"
+          - "{{ [l1,l2,l3,l4,l5,l6,l7,l8,l9,l10] | map(attribute='msg') | list }}"
+          - "{{ [b1,b2,b3] | map(attribute='changed') | list }} {{ [b1,b2,b3] | map(attribute='msg') | list }}"
+          - "{{ [r1,r2] | map(attribute='changed') | list }} {{ [r1,r2] | map(attribute='msg') | list }}"
+          - "{{ [i1,i2,i3,i4] | map(attribute='changed') | list }} {{ [i1,i2,i3,i4] | map(attribute='msg') | list }}"
+    - debug: msg="{{ sa.content | b64decode }}"
+    - debug: msg="{{ sb.content | b64decode }}"

@@ -583,8 +583,33 @@ pub(super) fn replace(a: &Args, ctx: &Ctx) -> Result<Res> {
         .multi_line(true)
         .build()?;
     let rep = crate::template::py_repl(&st(a, "replace").unwrap_or_default());
-    let count = re.find_iter(&old).count();
-    let new = re.replace_all(&old, rep.as_str()).into_owned();
+    let (after, before) = (st(a, "after"), st(a, "before"));
+    let (count, new) = if after.is_some() || before.is_some() {
+        let pat = match (&after, &before) {
+            (Some(x), Some(y)) => format!("(?s){x}(?P<sub>.*?){y}"),
+            (Some(x), None) => format!("(?s){x}(?P<sub>.*$)"),
+            (None, Some(y)) => format!("(?s)^(?P<sub>.*?){y}"),
+            _ => unreachable!(),
+        };
+        let sect = regex::Regex::new(&pat)?;
+        match sect.captures(&old).and_then(|c| c.name("sub")) {
+            Some(m) => {
+                let part = &old[m.start()..m.end()];
+                let n = re.find_iter(part).count();
+                let rep_part = re.replace_all(part, rep.as_str());
+                (
+                    n,
+                    format!("{}{}{}", &old[..m.start()], rep_part, &old[m.end()..]),
+                )
+            }
+            None => (0, old.clone()),
+        }
+    } else {
+        (
+            re.find_iter(&old).count(),
+            re.replace_all(&old, rep.as_str()).into_owned(),
+        )
+    };
     let mut r0 = res(false);
     r0.insert(
         "msg".into(),

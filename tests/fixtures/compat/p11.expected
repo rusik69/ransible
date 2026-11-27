@@ -1,0 +1,119 @@
+
+PLAY [w1] **********************************************************************
+
+TASK [file] ********************************************************************
+[WARNING]: Host 'w1' is using the discovered Python interpreter at '/opt/homebrew/bin/python3.14', but future installation of another Python interpreter could cause a different interpreter to be discovered. See https://docs.ansible.com/ansible-core/2.21/reference_appendices/interpreter_discovery.html for more information.
+changed: [w1]
+
+TASK [copy] ********************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+ok: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [lineinfile] **************************************************************
+ok: [w1]
+
+TASK [lineinfile] **************************************************************
+changed: [w1]
+
+TASK [blockinfile] *************************************************************
+changed: [w1]
+
+TASK [blockinfile] *************************************************************
+ok: [w1]
+
+TASK [blockinfile] *************************************************************
+changed: [w1]
+
+TASK [replace] *****************************************************************
+changed: [w1]
+
+TASK [replace] *****************************************************************
+ok: [w1]
+
+TASK [ini_file] ****************************************************************
+changed: [w1]
+
+TASK [ini_file] ****************************************************************
+ok: [w1]
+
+TASK [ini_file] ****************************************************************
+changed: [w1]
+
+TASK [ini_file] ****************************************************************
+changed: [w1]
+
+TASK [slurp] *******************************************************************
+ok: [w1]
+
+TASK [slurp] *******************************************************************
+ok: [w1]
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "msg": [
+        [
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            false,
+            true
+        ],
+        [
+            "line replaced",
+            "line added",
+            "line added",
+            "line replaced",
+            "",
+            "line added",
+            "line added",
+            "1 line(s) removed",
+            "",
+            "line added"
+        ],
+        "[True, False, True] ['Block inserted', '', 'Block removed']",
+        "[True, False] ['1 replacements made', '']",
+        "[True, False, True, True] ['section and option added', 'OK', 'section and option added', 'option changed']"
+    ]
+}
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "msg": "at_bof\n# header\nalpha = 1\nnew_after_alpha\nbeta=22\nbefore_section\n[section]\ngamma:3\nat_eof\n"
+}
+
+TASK [debug] *******************************************************************
+ok: [w1] => {
+    "msg": "\n[s1]\n[s2]\nn=5\n"
+}
+
+PLAY RECAP *********************************************************************
+w1                         : ok=26   changed=16   unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+

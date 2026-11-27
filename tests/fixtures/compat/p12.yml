@@ -1,0 +1,18 @@
+- hosts: w1
+  gather_facts: no
+  tasks:
+    - file: {path: /tmp/ransible-compat-p12, state: directory}
+    - ini_file: {path: /tmp/ransible-compat-p12/b.ini, section: s1, option: k, value: v, create: yes}
+    - shell: "sed -n l /tmp/ransible-compat-p12/b.ini | tr '\\n' ' '"
+      register: s1
+    - ini_file: {path: /tmp/ransible-compat-p12/b.ini, section: s2, option: n, value: 5, no_extra_spaces: yes}
+    - shell: "sed -n l /tmp/ransible-compat-p12/b.ini | tr '\\n' ' '"
+      register: s2
+    - ini_file: {path: /tmp/ransible-compat-p12/b.ini, section: s1, option: k2, value: v2}
+    - shell: "sed -n l /tmp/ransible-compat-p12/b.ini | tr '\\n' ' '"
+      register: s3
+    - ini_file: {path: /tmp/ransible-compat-p12/b.ini, section: s1, option: k, state: absent}
+    - ini_file: {path: /tmp/ransible-compat-p12/b.ini, option: topopt, value: t}
+    - shell: "sed -n l /tmp/ransible-compat-p12/b.ini | tr '\\n' ' '"
+      register: s4
+    - debug: msg="{{ [s1.stdout, s2.stdout, s3.stdout, s4.stdout] }}"
