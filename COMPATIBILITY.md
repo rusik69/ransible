@@ -33,7 +33,7 @@ Offline tests (`cargo test`) additionally pin variable precedence to real Ansibl
 | `ansible.cfg` + `ANSIBLE_*` env, SSH password (needs `sshpass`) and become password, `docker`/`podman` connections, `-k/-K/-T/--start-at-task/--list-tags`, `ansible-playbook`/`ansible`/`ansible-vault` argv0 names, shell completions | done |
 | `strategy: free` (each host runs the play at its own pace; `hostvars` of other hosts are not visible during the play), `add_host`, `group_by` | done |
 | Collections: `ransible galaxy collection install ns.name[==ver]` (galaxy.ansible.com), roles inside collections by FQCN (`ns.coll.role`), `ansible-galaxy` argv0; Python plugins/modules inside collections are not executed (the common collection modules are native) | done |
-| Vault ids | not yet |
+| Vault ids (`--vault-id label@file|prompt`, labelled 1.2 headers; failures to decrypt a vars file are hard errors) | done |
 | AWX-style web UI + REST API in the same binary (`ransible serve`): projects, inventories, credentials, templates, jobs with live output, users/roles, dashboard | done incl. schedules, notifications, activity stream, workflows with approvals, surveys, teams and object-level grants (OIDC/LDAP, remote workers: planned) |
 
 ## Modules (native)

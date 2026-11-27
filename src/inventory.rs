@@ -615,12 +615,22 @@ fn walk_files(d: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Load a YAML/JSON (optionally vault-encrypted) vars file into `out`.
+pub fn try_load_vars_file(p: &Path, out: &mut Map<String, Value>) -> Result<()> {
+    let t = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+    match crate::playbook::parse_yaml_str(&t)
+        .with_context(|| format!("loading vars file {}", p.display()))?
+    {
+        Value::Object(m) => out.extend(m),
+        Value::Null => {}
+        _ => return Err(anyhow!("vars file {} must be a mapping", p.display())),
+    }
+    Ok(())
+}
+
+/// Lenient variant for inventory directories (group_vars/host_vars): warns and continues.
 pub fn load_vars_file(p: &Path, out: &mut Map<String, Value>) {
-    if let Ok(t) = std::fs::read_to_string(p) {
-        match crate::playbook::parse_yaml_str(&t) {
-            Ok(Value::Object(m)) => out.extend(m),
-            Ok(_) => {}
-            Err(e) => eprintln!("[WARNING]: could not load vars file {}: {e:#}", p.display()),
-        }
+    if let Err(e) = try_load_vars_file(p, out) {
+        eprintln!("[WARNING]: {e:#}");
     }
 }

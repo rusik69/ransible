@@ -984,7 +984,7 @@ fn include_vars(a: &Args, ctx: &Ctx) -> Result<Res> {
     let mut out = Map::new();
     if let Some(f) = f {
         let p = find_src(ctx, "vars", &f)?;
-        crate::inventory::load_vars_file(&p, &mut out);
+        crate::inventory::try_load_vars_file(&p, &mut out)?;
     } else if let Some(d) = st(a, "dir") {
         let p = find_src(ctx, "vars", &d)?;
         let mut fs: Vec<_> = std::fs::read_dir(&p)?
@@ -999,7 +999,7 @@ fn include_vars(a: &Args, ctx: &Ctx) -> Result<Res> {
             .collect();
         fs.sort();
         for f in fs {
-            crate::inventory::load_vars_file(&f, &mut out);
+            crate::inventory::try_load_vars_file(&f, &mut out)?;
         }
     }
     let out = match st(a, "name") {

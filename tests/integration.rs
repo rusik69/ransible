@@ -250,3 +250,73 @@ fn roles_from_collections_resolve_by_fqcn() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("from collection role"), "{stdout}");
 }
+
+#[test]
+fn vault_ids_select_password_by_label_and_missing_secret_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("ransible-vid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_ransible");
+    let sh = |args: &[&str]| {
+        Command::new(bin)
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+    std::fs::write(dir.join("dev.pw"), "devpw\n").unwrap();
+    std::fs::write(dir.join("prod.pw"), "prodpw\n").unwrap();
+    std::fs::write(dir.join("dev.yml"), "who_dev: d\n").unwrap();
+    std::fs::write(dir.join("prod.yml"), "who_prod: p\n").unwrap();
+    assert!(
+        sh(&[
+            "vault",
+            "encrypt",
+            "dev.yml",
+            "--vault-id",
+            "dev@dev.pw",
+            "--encrypt-vault-id",
+            "dev"
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        sh(&[
+            "vault",
+            "encrypt",
+            "prod.yml",
+            "--vault-id",
+            "dev@dev.pw",
+            "--vault-id",
+            "prod@prod.pw",
+            "--encrypt-vault-id",
+            "prod"
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("prod.yml"))
+            .unwrap()
+            .starts_with("$ANSIBLE_VAULT;1.2;AES256;prod")
+    );
+    std::fs::write(dir.join("p.yml"), "- hosts: localhost\n  connection: local\n  gather_facts: no\n  vars_files: [dev.yml, prod.yml]\n  tasks:\n    - debug: msg=\"{{ who_dev }}{{ who_prod }}\"\n").unwrap();
+    let ok = sh(&[
+        "playbook",
+        "p.yml",
+        "--vault-id",
+        "dev@dev.pw",
+        "--vault-id",
+        "prod@prod.pw",
+    ]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("\"dp\""));
+    let missing = sh(&["playbook", "p.yml", "--vault-id", "dev@dev.pw"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("Decryption failed"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

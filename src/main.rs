@@ -101,6 +101,9 @@ struct Common {
     /// Prompt for the vault password
     #[arg(long = "ask-vault-pass", visible_alias = "ask-vault-password")]
     ask_vault_pass: bool,
+    /// Vault identity: `label@file`, `label@prompt`, `file` or `prompt` (repeatable)
+    #[arg(long = "vault-id")]
+    vault_id: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -147,6 +150,9 @@ enum Cmd {
         new_vault_password_file: Option<String>,
         #[arg(long = "ask-vault-pass")]
         ask_vault_pass: bool,
+        /// Vault identity: `label@file`, `label@prompt`, `file` or `prompt` (repeatable)
+        #[arg(long = "vault-id")]
+        vault_id: Vec<String>,
         /// Variable name for encrypt_string
         #[arg(short = 'n', long = "name")]
         name: Option<String>,
@@ -366,17 +372,32 @@ fn build_runner(c: &Common, dir: &Path) -> Result<executor::Runner> {
     })
 }
 
-fn init_vault(file: &Option<String>, ask: bool) -> Result<()> {
-    let pw = if let Some(f) = file {
-        Some(vault::load_password_file(f)?)
+fn init_vault(file: &Option<String>, ask: bool, ids: &[String]) -> Result<()> {
+    let mut pws: Vec<(Option<String>, String)> = vec![];
+    for id in ids {
+        let (label, src) = match id.split_once('@') {
+            Some((l, s)) => (Some(l.to_string()).filter(|l| !l.is_empty()), s),
+            None => (None, id.as_str()),
+        };
+        let pw = if src == "prompt" {
+            rpassword::prompt_password(format!(
+                "Vault password ({}): ",
+                label.as_deref().unwrap_or("default")
+            ))?
+        } else {
+            vault::load_password_file(src)?
+        };
+        pws.push((label, pw));
+    }
+    if let Some(f) = file {
+        pws.push((None, vault::load_password_file(f)?));
     } else if let Some(f) = &config::get().vault_password_file {
-        Some(vault::load_password_file(f)?)
-    } else if ask {
-        Some(rpassword::prompt_password("Vault password: ")?)
-    } else {
-        None
-    };
-    vault::set_password(pw);
+        pws.push((None, vault::load_password_file(f)?));
+    }
+    if ask {
+        pws.push((None, rpassword::prompt_password("Vault password: ")?));
+    }
+    vault::set_passwords(pws);
     Ok(())
 }
 
@@ -387,8 +408,10 @@ fn vault_cmd(
     name: &Option<String>,
     label: &Option<String>,
 ) -> Result<i32> {
-    let pw = vault::password().ok_or_else(|| {
-        anyhow!("a vault password is required (--vault-password-file or --ask-vault-pass)")
+    let pw = vault::password_for(label.as_deref()).ok_or_else(|| {
+        anyhow!(
+            "a vault password is required (--vault-password-file, --vault-id or --ask-vault-pass)"
+        )
     })?;
     match action {
         "encrypt" => {
@@ -455,14 +478,17 @@ fn run() -> Result<i32> {
     match &cli.cmd {
         Cmd::Playbook { common, .. }
         | Cmd::Adhoc { common, .. }
-        | Cmd::Inventory { common, .. } => {
-            init_vault(&common.vault_password_file, common.ask_vault_pass)?
-        }
+        | Cmd::Inventory { common, .. } => init_vault(
+            &common.vault_password_file,
+            common.ask_vault_pass,
+            &common.vault_id,
+        )?,
         Cmd::Vault {
             vault_password_file,
             ask_vault_pass,
+            vault_id,
             ..
-        } => init_vault(vault_password_file, *ask_vault_pass)?,
+        } => init_vault(vault_password_file, *ask_vault_pass, vault_id)?,
         _ => {}
     }
     match cli.cmd {

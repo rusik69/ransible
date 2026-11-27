@@ -1805,7 +1805,7 @@ impl Runner {
                     let p = play.dir.join(&c);
                     if p.is_file() {
                         let mut m = Map::new();
-                        crate::inventory::load_vars_file(&p, &mut m);
+                        crate::inventory::try_load_vars_file(&p, &mut m)?;
                         h.layer.extend(m);
                         break;
                     }

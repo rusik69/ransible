@@ -8,15 +8,28 @@ use std::sync::OnceLock;
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 const HEADER: &str = "$ANSIBLE_VAULT";
 
-static PASSWORD: OnceLock<Option<String>> = OnceLock::new();
+/// (label, password) pairs; the first entry is the default for encryption.
+static PASSWORDS: OnceLock<Vec<(Option<String>, String)>> = OnceLock::new();
 
 /// Configure the global vault password (from --vault-password-file / --ask-vault-pass / env).
-pub fn set_password(p: Option<String>) {
-    let _ = PASSWORD.set(p);
+pub fn set_passwords(p: Vec<(Option<String>, String)>) {
+    let _ = PASSWORDS.set(p);
 }
 
-pub fn password() -> Option<String> {
-    PASSWORD.get().cloned().flatten()
+/// Password to encrypt with: the one labelled `label`, else the default.
+pub fn password_for(label: Option<&str>) -> Option<String> {
+    let all = PASSWORDS.get()?;
+    label
+        .and_then(|l| all.iter().find(|(lab, _)| lab.as_deref() == Some(l)))
+        .or_else(|| all.first())
+        .map(|(_, p)| p.clone())
+}
+
+/// Vault label from a `$ANSIBLE_VAULT;1.2;AES256;label` header.
+pub fn header_label(text: &str) -> Option<String> {
+    let first = text.trim_start().lines().next()?;
+    let parts: Vec<&str> = first.trim().split(';').collect();
+    (parts.len() >= 4).then(|| parts[3].to_string())
 }
 
 pub fn load_password_file(path: &str) -> Result<String> {
@@ -123,8 +136,22 @@ pub fn encrypt(data: &[u8], password: &str, label: Option<&str>) -> Result<Strin
 
 /// Decrypt vault text with the configured password.
 pub fn decrypt_auto(text: &str) -> Result<Vec<u8>> {
-    let pw = password().ok_or_else(|| anyhow!("Attempting to decrypt but no vault secrets found (use --vault-password-file or --ask-vault-pass)"))?;
-    decrypt(text, &pw)
+    let all = PASSWORDS.get().filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("Attempting to decrypt but no vault secrets found (use --vault-password-file, --vault-id or --ask-vault-pass)"))?;
+    // try the password with the matching label first, then the rest
+    let label = header_label(text);
+    let mut order: Vec<&(Option<String>, String)> = all
+        .iter()
+        .filter(|(l, _)| l.is_some() && *l == label)
+        .collect();
+    order.extend(all.iter().filter(|(l, _)| !(l.is_some() && *l == label)));
+    let mut last = None;
+    for (_, pw) in order {
+        match decrypt(text, pw) {
+            Ok(v) => return Ok(v),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("Decryption failed")))
 }
 
 /// Read a file, transparently decrypting vaulted content.
@@ -140,6 +167,15 @@ pub fn read_file(path: &std::path::Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn labels_and_headers() {
+        let enc = encrypt(b"x", "pw", Some("prod")).unwrap();
+        assert!(enc.starts_with("$ANSIBLE_VAULT;1.2;AES256;prod\n"));
+        assert_eq!(header_label(&enc).as_deref(), Some("prod"));
+        assert_eq!(header_label(&encrypt(b"x", "pw", None).unwrap()), None);
+        assert_eq!(decrypt(&enc, "pw").unwrap(), b"x");
+    }
+
     #[test]
     fn roundtrip() {
         let enc = encrypt(b"secret: 42\n", "pw", None).unwrap();
