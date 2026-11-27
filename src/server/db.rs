@@ -33,12 +33,13 @@ CREATE TABLE IF NOT EXISTS job_templates (
   skip_tags TEXT NOT NULL DEFAULT '', verbosity INTEGER NOT NULL DEFAULT 0, forks INTEGER NOT NULL DEFAULT 5,
   job_type TEXT NOT NULL DEFAULT 'run', become_enabled INTEGER NOT NULL DEFAULT 0, diff_mode INTEGER NOT NULL DEFAULT 0,
   survey_enabled INTEGER NOT NULL DEFAULT 0, survey_spec TEXT NOT NULL DEFAULT '',
+  worker TEXT NOT NULL DEFAULT '',
   created TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY, template_id INTEGER, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
   launched_by TEXT NOT NULL DEFAULT '', job_type TEXT NOT NULL DEFAULT 'run', playbook TEXT NOT NULL DEFAULT '',
   params TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL DEFAULT (datetime('now')),
-  started TEXT, finished TEXT, rc INTEGER, summary TEXT NOT NULL DEFAULT '[]');
+  started TEXT, finished TEXT, rc INTEGER, summary TEXT NOT NULL DEFAULT '[]', worker TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS job_events (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS schedules (
@@ -76,6 +77,9 @@ CREATE TABLE IF NOT EXISTS grants (
   id INTEGER PRIMARY KEY, subject_type TEXT NOT NULL, subject_id INTEGER NOT NULL,
   object_type TEXT NOT NULL, object_id INTEGER NOT NULL, role TEXT NOT NULL,
   UNIQUE (subject_type, subject_id, object_type, object_id));
+CREATE TABLE IF NOT EXISTS workers (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, token_hash TEXT UNIQUE NOT NULL, last_seen TEXT,
+  created TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 "#;
 
@@ -86,6 +90,14 @@ pub fn open(path: &Path) -> Result<Connection> {
     c.execute_batch(SCHEMA)?;
     // migrations for databases created by older versions
     let _ = c.execute("ALTER TABLE jobs ADD COLUMN workflow_job_id INTEGER", []);
+    let _ = c.execute(
+        "ALTER TABLE jobs ADD COLUMN worker TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE job_templates ADD COLUMN worker TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     let _ = c.execute(
         "ALTER TABLE job_templates ADD COLUMN survey_enabled INTEGER NOT NULL DEFAULT 0",
         [],

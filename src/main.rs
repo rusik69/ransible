@@ -12,6 +12,7 @@ mod playbook;
 mod server;
 mod template;
 mod vault;
+mod worker;
 
 use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand};
@@ -195,6 +196,27 @@ enum Cmd {
         /// TLS private key (PEM)
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+    },
+    /// Run jobs for a ransible server (remote execution node)
+    Worker {
+        /// Server URL, e.g. https://ransible.example.com
+        #[arg(long, env = "RANSIBLE_SERVER")]
+        server: String,
+        /// Worker token (create one under Workers in the UI or POST /api/v2/workers/)
+        #[arg(long, env = "RANSIBLE_WORKER_TOKEN", hide_env_values = true)]
+        token: String,
+        /// CA certificate (PEM) to trust for the server
+        #[arg(long)]
+        cacert: Option<String>,
+        /// Do not verify the server certificate (insecure)
+        #[arg(long)]
+        insecure_skip_verify: bool,
+        /// Allow plain http:// to a non-loopback server (credentials travel unencrypted!)
+        #[arg(long)]
+        allow_insecure_http: bool,
+        /// Exit after running this many jobs
+        #[arg(long, hide = true)]
+        max_jobs: Option<u32>,
     },
     /// Print shell completions (bash, zsh, fish, elvish, powershell)
     Completions { shell: clap_complete::Shell },
@@ -569,6 +591,24 @@ fn run() -> Result<i32> {
                 max_jobs: max_concurrent_jobs,
                 tls: tls_cert.zip(tls_key),
             }))?;
+            Ok(0)
+        }
+        Cmd::Worker {
+            server,
+            token,
+            cacert,
+            insecure_skip_verify,
+            allow_insecure_http,
+            max_jobs,
+        } => {
+            worker::run(worker::Options {
+                server,
+                token,
+                cacert,
+                insecure_skip_verify,
+                allow_insecure_http,
+                max_jobs,
+            })?;
             Ok(0)
         }
         Cmd::Completions { shell } => {

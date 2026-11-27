@@ -10,7 +10,7 @@ automation runner in Rust. Goal: run existing Ansible inventories/playbooks/role
 - `src/template.rs` Jinja2 via minijinja + Ansible filters/tests/lookups.
 - `src/executor/` run engine: `mod.rs` types/helpers, `vars.rs` variable layers + connections, `tasks.rs` per-host task execution/loops, `flow.rs` blocks/includes/roles/handlers, `play.rs` plays/batches/strategy/recap.
 - `src/modules/` built-in modules: `mod.rs` helpers + dispatch (`run`), grouped by area in `command.rs`, `files.rs`, `pkg.rs`, `system.rs`, `net.rs`, `control.rs`; `modules_extra.rs`, `mysql.rs` for more.
-- `src/events.rs` structured run events + console/JSON sinks. `src/server/` (feature `server`): axum REST API, SQLite, job runner; `web/` embedded SPA.
+- `src/events.rs` structured run events + console/JSON sinks. `src/server/` (feature `server`): axum REST API, SQLite, job runner; `web/` embedded SPA; `src/server/remote.rs` + `src/worker.rs` remote execution.
 - `src/conn.rs` local/ssh connection (shells out to `ssh`; `become` via sudo).
 - `tests/integration.rs` fast offline tests; `tests/e2e/` differential tests vs real Ansible.
 

@@ -80,12 +80,12 @@ const all = async (res) => (await api(`/${res}/?page_size=200`)).results;
 const nameOf = (list, id) => (list.find((x) => x.id === id) || {}).name || '—';
 
 // ---------- shell ----------
-const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['workflows', 'Workflows'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['teams', 'Teams'], ['users', 'Users']];
+const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['workflows', 'Workflows'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['teams', 'Teams'], ['workers', 'Workers'], ['users', 'Users']];
 function shell(route, content) {
   closeLive();
   $app.replaceChildren(h('div', { class: 'layout' },
     h('nav', { class: 'side' }, h('div', { class: 'brand' }, h('i', {}, 'R'), 'Ransible'),
-      NAV.filter(([k]) => !['users', 'teams', 'notifications'].includes(k) || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
+      NAV.filter(([k]) => !['users', 'teams', 'notifications', 'workers'].includes(k) || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
       h('div', { class: 'spacer' }), h('div', { class: 'who' }, me.username + ' · ' + me.role),
       h('a', { class: 'nav', href: '#/account' }, 'Account'), h('a', { class: 'nav', href: '#', onclick: (e) => { e.preventDefault(); logout(); } }, 'Sign out')),
     h('main', { class: 'main' }, content)));
@@ -174,6 +174,18 @@ const credentials = crud({ res: 'credentials', title: 'Credentials', single: 'cr
     { name: 'ssh_private_key', label: 'SSH private key (blank = keep)', type: 'textarea', placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----' }, { name: 'password', label: 'SSH password (blank = keep)', type: 'password', half: true }, { name: 'become_password', label: 'Become password (blank = keep)', type: 'password', half: true }, { name: 'vault_password', label: 'Vault password (blank = keep)', type: 'password' }],
   beforeSave: (b) => { const s = {}; for (const k of ['ssh_private_key', 'password', 'become_password', 'vault_password']) { if (b[k]) s[k] = b[k]; delete b[k]; } if (Object.keys(s).length) b.secrets = s; },
   columns: () => [{ title: 'Name', render: (c) => c.name }, { title: 'Type', render: (c) => c.kind }, { title: 'User', render: (c) => c.username || '—' }, { title: 'Secrets', render: (c) => Object.keys(c.secrets || {}).join(', ') || '—' }] });
+async function workers() {
+  const rows = await all('workers');
+  const add = () => { const f = form([{ name: 'name', label: 'Worker name (letters, digits, - _ .)' }]);
+    modal('New worker', f.el, (close) => [h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: guard(async () => {
+      const w = await api('/workers/', { method: 'POST', body: f.get() }); close();
+      const cmd = `ransible worker --server ${location.origin} --token ${w.token}`;
+      modal('Worker token (shown once)', h('div', {}, h('p', {}, 'Copy this token now; it cannot be shown again. Run on the execution node:'), h('pre', { class: 'out' }, cmd), h('p', { class: 'muted' }, 'Use https:// to a non-local server: the worker receives project files and credentials.')), (c2) => [h('button', { class: 'primary', onclick: () => { c2(); route(); } }, 'Done')]);
+    }) }, 'Create')]); };
+  shell('workers', [h('div', { class: 'bar' }, h('h1', {}, 'Workers (remote execution nodes)'), h('button', { class: 'primary', onclick: add }, 'New worker')),
+    table([{ title: 'Name', render: (w) => w.name }, { title: 'Status', render: (w) => badge(w.online ? 'successful' : 'canceled') }, { title: 'Last seen', render: (w) => when(w.last_seen) },
+      { title: '', render: (w) => h('button', { class: 'danger', onclick: guard(async () => { if (!confirm(`Remove worker "${w.name}"?`)) return; await api(`/workers/${w.id}/`, { method: 'DELETE' }); route(); }) }, 'Remove') }], rows, 'Workers run jobs on other machines. Create one, then start `ransible worker` there. Set a template\'s worker to run it remotely.')]);
+}
 const OBJ_TYPES = [['job_templates', 'Job template'], ['workflow_templates', 'Workflow'], ['projects', 'Project'], ['inventories', 'Inventory'], ['credentials', 'Credential'], ['schedules', 'Schedule']];
 async function accessModal(subjectType, subj) {
   const [grants, ...lists] = await Promise.all([api('/grants/?page_size=200').then((r) => r.results.filter((g) => g.subject_type === subjectType && g.subject_id === subj.id)), ...OBJ_TYPES.map(([t]) => all(t))]);
@@ -290,7 +302,7 @@ async function activity() {
   shell('activity', [h('h1', {}, 'Activity stream'), table([{ title: 'Time', render: (a) => when(a.ts) }, { title: 'User', render: (a) => a.username }, { title: 'Action', render: (a) => a.action }, { title: 'Object', render: (a) => a.object_type + (a.object_id ? ' #' + a.object_id : '') }, { title: 'Summary', render: (a) => a.summary }], rows, 'No activity yet.')]);
 }
 const templates = async () => {
-  const [rows, projs, invs, creds] = await Promise.all([all('job_templates'), all('projects'), all('inventories'), all('credentials')]);
+  const [rows, projs, invs, creds, wks] = await Promise.all([all('job_templates'), all('projects'), all('inventories'), all('credentials'), all('workers')]);
   const opt = (l, none) => [{ value: '', label: none }, ...l.map((x) => ({ value: x.id, label: x.name }))];
   const edit = async (row) => {
     const f = form([{ name: 'name', label: 'Name' }, { name: 'description', label: 'Description' },
@@ -298,7 +310,8 @@ const templates = async () => {
       { name: 'inventory_id', label: 'Inventory', type: 'select', options: opt(invs, '— select —'), half: true, nullEmpty: true }, { name: 'credential_id', label: 'Credential', type: 'select', options: opt(creds.filter((c) => c.kind === 'machine'), '— none —'), half: true, nullEmpty: true },
       { name: 'vault_credential_id', label: 'Vault credential', type: 'select', options: opt(creds.filter((c) => c.kind === 'vault'), '— none —'), nullEmpty: true },
       { name: 'extra_vars', label: 'Extra variables (YAML/JSON)', type: 'textarea' }, { name: 'limit_hosts', label: 'Limit', half: true }, { name: 'tags', label: 'Tags', half: true },
-      { name: 'job_type', label: 'Job type', type: 'select', options: ['run', 'check'], half: true }, { name: 'forks', label: 'Forks', type: 'number', half: true }, { name: 'become_enabled', label: 'Privilege escalation (become)', type: 'checkbox', half: true }, { name: 'diff_mode', label: 'Show diffs', type: 'checkbox', half: true },
+      { name: 'job_type', label: 'Job type', type: 'select', options: ['run', 'check'], half: true }, { name: 'forks', label: 'Forks', type: 'number', half: true },
+      { name: 'worker', label: 'Run on', type: 'select', options: [{ value: '', label: 'this server' }, ...wks.map((w) => ({ value: w.name, label: 'worker: ' + w.name + (w.online ? '' : ' (offline)') }))] }, { name: 'become_enabled', label: 'Privilege escalation (become)', type: 'checkbox', half: true }, { name: 'diff_mode', label: 'Show diffs', type: 'checkbox', half: true },
       { name: 'survey_enabled', label: 'Enable survey (prompt at launch)', type: 'checkbox' }, { name: 'survey_spec', label: 'Survey questions (JSON list: variable, question, type, required, default, choices, min, max)', type: 'textarea', placeholder: '[{"variable":"env","question":"Environment","type":"multiplechoice","choices":["dev","prod"],"default":"dev"}]' }],
       row ? { ...row, become_enabled: !!row.become_enabled, diff_mode: !!row.diff_mode, survey_enabled: !!row.survey_enabled } : { job_type: 'run', forks: 5 });
     const hint = h('div', { class: 'muted', style: 'font-size:12px;margin-top:4px' });
@@ -339,7 +352,7 @@ async function route() {
   try {
     if (!me) me = await api('/me/');
     const [r, arg] = (location.hash.replace(/^#\//, '') || 'dashboard').split('/');
-    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, workflows, wfjob: () => wfJob(arg), schedules, projects, inventories, credentials, notifications, activity, teams, users, account };
+    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, workflows, wfjob: () => wfJob(arg), schedules, projects, inventories, credentials, notifications, activity, teams, workers, users, account };
     await (views[r] || dashboard)();
   } catch (e) { if (token) toast(e.message, true); }
 }

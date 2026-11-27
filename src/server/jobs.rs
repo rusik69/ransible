@@ -15,6 +15,27 @@ pub type LiveMsg = (i64, String);
 pub struct Live {
     pub tx: broadcast::Sender<LiveMsg>,
     pub cancel: std::sync::Arc<Notify>,
+    /// set when a cancel was requested (remote workers poll it)
+    pub canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// last time a remote worker reported in (events/heartbeat)
+    pub last_activity: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+}
+
+impl Live {
+    pub fn new() -> (Live, broadcast::Sender<LiveMsg>) {
+        let (tx, _) = broadcast::channel(1024);
+        (
+            Live {
+                tx: tx.clone(),
+                cancel: std::sync::Arc::new(Notify::new()),
+                canceled: Default::default(),
+                last_activity: std::sync::Arc::new(
+                    std::sync::Mutex::new(std::time::Instant::now()),
+                ),
+            },
+            tx,
+        )
+    }
 }
 
 pub fn render(e: &Event) -> String {
@@ -97,13 +118,13 @@ fn set_status(state: &AppState, id: i64, sql_extra: &str, status: &str) {
     }
 }
 
-struct Prepared {
-    args: Vec<String>,
-    dir: PathBuf,
-    cwd: PathBuf,
+pub struct Prepared {
+    pub args: Vec<String>,
+    pub dir: PathBuf,
+    pub cwd: PathBuf,
 }
 
-fn prepare(state: &AppState, job_id: i64, params: &Map<String, Value>) -> Result<Prepared> {
+pub fn prepare(state: &AppState, job_id: i64, params: &Map<String, Value>) -> Result<Prepared> {
     let dir = state.data_dir.join("jobs").join(job_id.to_string());
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -354,44 +375,71 @@ pub async fn notify(state: AppState, job_id: i64, event: String) {
     }
 }
 
+/// Record the final status of a job (summary from the last recap event) and fire notifications.
+pub fn finish_job(state: &AppState, job_id: i64, status: &str, rc: Option<i64>) {
+    let c = state.db.lock().unwrap();
+    let summary = db::query(
+        &c,
+        "SELECT event FROM job_events WHERE job_id = ?1 ORDER BY seq DESC",
+        &[rusqlite::types::Value::Integer(job_id)],
+    )
+    .ok()
+    .and_then(|rows| {
+        rows.into_iter().find_map(|r| {
+            match serde_json::from_str::<Event>(r["event"].as_str().unwrap_or("")) {
+                Ok(Event::Recap { stats }) => {
+                    Some(serde_json::to_string(&stats).unwrap_or_default())
+                }
+                _ => None,
+            }
+        })
+    })
+    .unwrap_or_else(|| "[]".into());
+    let _ = c.execute(
+        "UPDATE jobs SET status = ?1, finished = datetime('now'), rc = ?2, summary = ?3 WHERE id = ?4",
+        rusqlite::params![status, rc, summary, job_id],
+    );
+    drop(c);
+    tokio::spawn(notify(state.clone(), job_id, status.to_string()));
+}
+
+/// Store one event (next sequence number from the DB) and push it to live subscribers.
+pub fn ingest_event(state: &AppState, job_id: i64, ev: &Event) {
+    let seq = {
+        let Ok(c) = state.db.lock() else { return };
+        let next: i64 = c
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM job_events WHERE job_id = ?1",
+                [job_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+        let _ = c.execute(
+            "INSERT INTO job_events (job_id, seq, event) VALUES (?1, ?2, ?3)",
+            rusqlite::params![job_id, next, serde_json::to_string(ev).unwrap_or_default()],
+        );
+        next
+    };
+    let tx = state
+        .live
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .map(|l| l.tx.clone());
+    if let Some(tx) = tx {
+        let _ = tx.send((seq, render(ev)));
+    }
+}
+
 pub async fn run_job(state: AppState, job_id: i64) {
     let live = {
-        let (tx, _) = broadcast::channel(1024);
-        let l = Live {
-            tx: tx.clone(),
-            cancel: std::sync::Arc::new(Notify::new()),
-        };
+        let (l, tx) = Live::new();
         let cancel = l.cancel.clone();
         state.live.lock().unwrap().insert(job_id, l);
         (tx, cancel)
     };
     let (tx, cancel) = live;
-    let finish = |status: &str, rc: Option<i64>| {
-        let c = state.db.lock().unwrap();
-        let summary = db::query(
-            &c,
-            "SELECT event FROM job_events WHERE job_id = ?1 ORDER BY seq DESC",
-            &[rusqlite::types::Value::Integer(job_id)],
-        )
-        .ok()
-        .and_then(|rows| {
-            rows.into_iter().find_map(|r| {
-                match serde_json::from_str::<Event>(r["event"].as_str().unwrap_or("")) {
-                    Ok(Event::Recap { stats }) => {
-                        Some(serde_json::to_string(&stats).unwrap_or_default())
-                    }
-                    _ => None,
-                }
-            })
-        })
-        .unwrap_or_else(|| "[]".into());
-        let _ = c.execute(
-            "UPDATE jobs SET status = ?1, finished = datetime('now'), rc = ?2, summary = ?3 WHERE id = ?4",
-            rusqlite::params![status, rc, summary, job_id],
-        );
-        drop(c);
-        tokio::spawn(notify(state.clone(), job_id, status.to_string()));
-    };
+    let finish = |status: &str, rc: Option<i64>| finish_job(&state, job_id, status, rc);
     let mut seq: i64 = 0;
     let mut emit = |ev: Event, tx: &broadcast::Sender<LiveMsg>| {
         seq += 1;

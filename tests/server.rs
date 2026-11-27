@@ -1382,3 +1382,252 @@ fn serves_https_with_tls_cert_and_key() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("token"));
 }
+
+struct Worker(Child);
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_worker(s: &Server, token: &str) -> Worker {
+    Worker(
+        Command::new(env!("CARGO_BIN_EXE_ransible"))
+            .args(["worker", "--server", &s.base, "--token", token])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+#[test]
+fn remote_worker_runs_jobs_streams_output_and_can_be_canceled() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start("worker");
+    let tok = j(login(&s, "admin", "admin-password-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let proj_dir = s.dir.join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(proj_dir.join("site.yml"), "- hosts: all\n  gather_facts: no\n  tasks:\n    - debug: msg=\"remote hello {{ who }}\"\n    - command: echo done\n").unwrap();
+    std::fs::write(
+        proj_dir.join("slow.yml"),
+        "- hosts: all\n  gather_facts: no\n  tasks:\n    - command: sleep 30\n",
+    )
+    .unwrap();
+    let pid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/projects/",
+        Some(&tok),
+        Some(json!({"name": "p", "local_path": proj_dir.to_str().unwrap()})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let iid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/inventories/",
+        Some(&tok),
+        Some(json!({"name": "i", "content": "localhost ansible_connection=local\n"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    // unknown worker names are rejected
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/job_templates/",
+            Some(&tok),
+            Some(json!({"name": "x", "project_id": pid, "playbook": "site.yml", "worker": "nope"}))
+        )
+        .0,
+        400
+    );
+    // worker management: admin only, token shown once
+    let w = j(curl(
+        &s,
+        "POST",
+        "/api/v2/workers/",
+        Some(&tok),
+        Some(json!({"name": "node-1"})),
+    ));
+    let wtok = w["token"].as_str().unwrap().to_string();
+    assert!(
+        !curl(&s, "GET", "/api/v2/workers/", Some(&tok), None)
+            .1
+            .contains(&wtok)
+    );
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/workers/",
+            Some(&tok),
+            Some(json!({"name": "bad name!"}))
+        )
+        .0,
+        400
+    );
+    let mk = |name: &str, pb: &str| {
+        j(curl(&s, "POST", "/api/v2/job_templates/", Some(&tok), Some(json!({"name": name, "project_id": pid, "playbook": pb, "inventory_id": iid, "worker": "node-1", "extra_vars": "who: worker"}))))["id"].as_i64().unwrap()
+    };
+    let (fast, slow) = (mk("fast", "site.yml"), mk("slow", "slow.yml"));
+
+    // no worker online yet: the job waits, and can be canceled while pending
+    let queued = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/job_templates/{fast}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        j(curl(
+            &s,
+            "GET",
+            &format!("/api/v2/jobs/{queued}/"),
+            Some(&tok),
+            None
+        ))["status"],
+        "pending"
+    );
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/jobs/{queued}/cancel/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        200
+    );
+    assert_eq!(wait_job(&s, &tok, queued)["status"], "canceled");
+
+    // a worker with a wrong token is rejected
+    let mut bad_worker = Command::new(env!("CARGO_BIN_EXE_ransible"))
+        .args(["worker", "--server", &s.base, "--token", "wrong"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while bad_worker.try_wait().unwrap().is_none() {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "worker with a bad token should exit"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(!bad_worker.wait().unwrap().success());
+
+    let _worker = spawn_worker(&s, &wtok);
+    // run a job on the worker
+    let id = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/job_templates/{fast}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let job = wait_job(&s, &tok, id);
+    assert_eq!(job["status"], "successful", "{job}");
+    assert_eq!(job["summary"][0]["host"], "localhost");
+    let out = curl(
+        &s,
+        "GET",
+        &format!("/api/v2/jobs/{id}/stdout/"),
+        Some(&tok),
+        None,
+    )
+    .1;
+    assert!(
+        out.contains("picked up by worker node-1")
+            && out.contains("remote hello worker")
+            && out.contains("PLAY RECAP"),
+        "{out}"
+    );
+    assert!(
+        j(curl(&s, "GET", "/api/v2/workers/", Some(&tok), None))["results"][0]["online"]
+            .as_bool()
+            .unwrap()
+    );
+    // relaunch keeps using the worker
+    let (c, b) = curl(
+        &s,
+        "POST",
+        &format!("/api/v2/jobs/{id}/relaunch/"),
+        Some(&tok),
+        None,
+    );
+    assert_eq!(c, 201);
+    assert_eq!(
+        wait_job(
+            &s,
+            &tok,
+            serde_json::from_str::<Value>(&b).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        )["status"],
+        "successful"
+    );
+
+    // cancel a running remote job: the worker kills the runner promptly
+    let sid = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/job_templates/{slow}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let t = Instant::now();
+    loop {
+        let out = curl(
+            &s,
+            "GET",
+            &format!("/api/v2/jobs/{sid}/stdout/"),
+            Some(&tok),
+            None,
+        )
+        .1;
+        if out.contains("TASK [command]") {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "slow job never started: {out}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let started = Instant::now();
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/jobs/{sid}/cancel/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        200
+    );
+    assert_eq!(wait_job(&s, &tok, sid)["status"], "canceled");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "cancel must not wait for sleep 30"
+    );
+}

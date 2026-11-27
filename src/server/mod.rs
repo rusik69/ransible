@@ -2,6 +2,7 @@
 mod cron;
 mod db;
 mod jobs;
+mod remote;
 mod survey;
 mod tls;
 mod workflows;
@@ -332,6 +333,7 @@ fn resource(name: &str) -> Option<Res> {
                 "diff_mode",
                 "survey_enabled",
                 "survey_spec",
+                "worker",
             ],
             write: "write",
         },
@@ -343,6 +345,11 @@ fn resource(name: &str) -> Option<Res> {
         "workflow_jobs" => Res {
             table: "workflow_jobs",
             cols: &["name", "status", "launched_by", "created"],
+            write: "write",
+        },
+        "workers" => Res {
+            table: "workers",
+            cols: &["name"],
             write: "write",
         },
         "teams" => Res {
@@ -437,6 +444,11 @@ fn sanitize(state: &AppState, res: &str, mut row: Map<String, Value>) -> Map<Str
             ),
         );
     }
+    if res == "workers" {
+        row.remove("token_hash");
+        let online = remote::worker_online(row.get("last_seen").and_then(|l| l.as_str()));
+        row.insert("online".into(), online.into());
+    }
     if res == "notification_templates" {
         let set = row
             .get("webhook_url")
@@ -481,6 +493,10 @@ struct ListQuery {
     page_size: Option<i64>,
     search: Option<String>,
     order_by: Option<String>,
+}
+
+async fn list_workers(State(st): State<AppState>, u: AuthUser, Query(q): Query<ListQuery>) -> R {
+    list_res(State(st), u, Path("workers".to_string()), Query(q)).await
 }
 
 async fn list_res(
@@ -710,6 +726,22 @@ fn prepare_body(
                     survey::validate_spec(&parsed).map_err(bad)?;
                 }
                 body.insert("survey_spec".into(), text.into());
+            }
+            if let Some(w) = body
+                .get("worker")
+                .and_then(|w| w.as_str())
+                .filter(|w| !w.is_empty())
+            {
+                let c = st.db.lock().unwrap();
+                let exists = !db::query(
+                    &c,
+                    "SELECT id FROM workers WHERE name = ?1",
+                    &[SqlValue::Text(w.to_string())],
+                )?
+                .is_empty();
+                if !exists {
+                    return Err(bad(format!("worker '{w}' does not exist")));
+                }
             }
             for k in ["become_enabled", "diff_mode", "survey_enabled"] {
                 if let Some(b) = body.get(k).and_then(|b| b.as_bool()) {
@@ -1192,15 +1224,43 @@ fn create_job(
             db::encrypt_secret(&st.master, &Value::Object(secrets).to_string())?.into();
     }
     let job_type = params["job_type"].as_str().unwrap_or("run").to_string();
+    insert_and_start(
+        st,
+        template["id"].as_i64(),
+        template["name"].as_str().unwrap_or(""),
+        by,
+        &job_type,
+        template["playbook"].as_str().unwrap_or(""),
+        &params.to_string(),
+        template["worker"].as_str().unwrap_or(""),
+    )
+}
+
+/// Insert a job row and start it locally, or queue it for the named remote worker.
+#[allow(clippy::too_many_arguments)]
+fn insert_and_start(
+    st: &AppState,
+    template_id: Option<i64>,
+    name: &str,
+    by: &str,
+    job_type: &str,
+    playbook: &str,
+    params: &str,
+    worker: &str,
+) -> Result<i64> {
     let job_id = {
         let c = st.db.lock().unwrap();
         c.execute(
-            "INSERT INTO jobs (template_id, name, launched_by, job_type, playbook, params) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![template["id"].as_i64(), template["name"].as_str().unwrap_or(""), by, job_type, template["playbook"].as_str().unwrap_or(""), params.to_string()],
+            "INSERT INTO jobs (template_id, name, launched_by, job_type, playbook, params, worker) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![template_id, name, by, job_type, playbook, params, worker],
         )?;
         c.last_insert_rowid()
     };
-    tokio::spawn(jobs::run_job(st.clone(), job_id));
+    if worker.is_empty() {
+        tokio::spawn(jobs::run_job(st.clone(), job_id));
+    } else {
+        tokio::spawn(remote::run_remote_job(st.clone(), job_id));
+    }
     Ok(job_id)
 }
 
@@ -1258,15 +1318,16 @@ async fn relaunch(
         let c = st.db.lock().unwrap();
         (db::get(&c, "jobs", id)?.ok_or_else(not_found)?,)
     };
-    let job_id = {
-        let c = st.db.lock().unwrap();
-        c.execute(
-            "INSERT INTO jobs (template_id, name, launched_by, job_type, playbook, params) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![job["template_id"].as_i64(), job["name"].as_str().unwrap_or(""), u.username, job["job_type"].as_str().unwrap_or("run"), job["playbook"].as_str().unwrap_or(""), job["params"].as_str().unwrap_or("{}")],
-        )?;
-        c.last_insert_rowid()
-    };
-    tokio::spawn(jobs::run_job(st.clone(), job_id));
+    let job_id = insert_and_start(
+        &st,
+        job["template_id"].as_i64(),
+        job["name"].as_str().unwrap_or(""),
+        &u.username,
+        job["job_type"].as_str().unwrap_or("run"),
+        job["playbook"].as_str().unwrap_or(""),
+        job["params"].as_str().unwrap_or("{}"),
+        job["worker"].as_str().unwrap_or(""),
+    )?;
     st.activity(
         &u.username,
         "relaunch",
@@ -1288,7 +1349,10 @@ async fn cancel_job(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>
     if !st.job_allowed(&u, id) {
         return Err(forbidden());
     }
-    let cancel = st.live.lock().unwrap().get(&id).map(|l| l.cancel.clone());
+    let cancel = st.live.lock().unwrap().get(&id).map(|l| {
+        l.canceled.store(true, std::sync::atomic::Ordering::Relaxed);
+        l.cancel.clone()
+    });
     match cancel {
         Some(n) => {
             st.activity(&u.username, "cancel", "job", id, "canceled job");
@@ -1779,6 +1843,14 @@ pub fn router(state: AppState) -> Router {
             "/api/v2/teams/{id}/members/{uid}/",
             axum::routing::delete(team_remove_member),
         )
+        .route(
+            "/api/v2/workers/",
+            get(list_workers).post(remote::create_worker),
+        )
+        .route("/api/v2/worker/claim/", post(remote::claim))
+        .route("/api/v2/worker/jobs/{id}/bundle/", get(remote::bundle))
+        .route("/api/v2/worker/jobs/{id}/events/", post(remote::events))
+        .route("/api/v2/worker/jobs/{id}/finish/", post(remote::finish))
         .route("/api/v2/{res}/", get(list_res).post(create_res))
         .route(
             "/api/v2/{res}/{id}/",
