@@ -28,7 +28,7 @@ fn playbook_roles_blocks_handlers() {
         out,
     );
     assert_eq!(code, 0, "{stdout}");
-    assert!(stdout.contains("RUNNING HANDLER [reload web]"));
+    assert!(stdout.contains("RUNNING HANDLER [web : reload web]"));
     assert!(stdout.contains("hi from web2 6"));
     let conf = std::fs::read_to_string(format!("{out}/web1/site.conf")).unwrap();
     assert!(
@@ -421,4 +421,51 @@ fn compat_file_module_results_match_ansible() {
         .collect();
     assert_eq!(got, want);
     let _ = std::fs::remove_dir_all("/tmp/ransible-compat-p5");
+}
+
+#[test]
+fn compat_roles_dependencies_includes_and_tags_match_ansible() {
+    let cases: [(&str, &[&str]); 4] = [
+        ("all", &[]),
+        ("app_tag", &["--tags", "app_tag"]),
+        ("special", &["--tags", "special"]),
+        ("plain_base", &["--tags", "plain,base_tag"]),
+    ];
+    for (name, extra) in cases {
+        let mut args = vec![
+            "playbook",
+            "tests/fixtures/compat/roles1/p.yml",
+            "-i",
+            "tests/fixtures/compat/roles1/inv.ini",
+        ];
+        args.extend(extra);
+        let (stdout, code) = run(&args, "/tmp/ransible-it-roles1");
+        assert_eq!(code, 0, "{name}: {stdout}");
+        let norm = |s: &str| -> Vec<String> {
+            s.lines()
+                .filter(|l| {
+                    l.starts_with("TASK ")
+                        || l.starts_with("RUNNING HANDLER ")
+                        || l.contains("\"msg\"")
+                        || l.starts_with("w1 ")
+                })
+                .map(|l| {
+                    l.trim_end_matches('*')
+                        .trim_end()
+                        .replace(" : ok=", " ok=")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        };
+        let want =
+            std::fs::read_to_string(format!("tests/fixtures/compat/roles1/expected/{name}.txt"))
+                .unwrap();
+        assert_eq!(
+            norm(&stdout),
+            norm(&want),
+            "roles fixture '{name}' differs from real Ansible"
+        );
+    }
 }

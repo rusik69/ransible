@@ -29,6 +29,10 @@ impl Runner {
                 continue;
             }
             ps.refresh_active();
+            // dynamic includes are tasks themselves: they obey --tags/--skip-tags
+            if matches!(t.module.as_str(), "include_tasks" | "include_role") && !self.selected(t) {
+                continue;
+            }
             match t.module.as_str() {
                 "include_tasks" | "import_tasks" => self.run_include_tasks(ps, &act, t, overlay)?,
                 "include_role" | "import_role" => self.run_include_role(ps, &act, t, overlay)?,
@@ -325,11 +329,10 @@ impl Runner {
         t: &Task,
         overlay: &Map<String, Value>,
     ) -> Result<()> {
-        if !self.selected(t) && t.module == "include_tasks" && !to_list(t.kw.get("tags")).is_empty()
-        {
-            // tags on include apply to children; still descend
-        }
         let sub = self.include_when(ps, act, t, overlay);
+        if t.module == "include_tasks" {
+            self.include_banner(ps, act, &sub, t, "include_tasks".into());
+        }
         if sub.is_empty() {
             return Ok(());
         }
@@ -354,7 +357,14 @@ impl Runner {
         if let Some(r) = &t.role {
             crate::playbook::tag_role(&mut tasks, r);
         }
+        if let Some(p) = &t.role_params {
+            crate::playbook::set_role_params(&mut tasks, p);
+        }
         let mut kw = t.kw.clone();
+        // dynamic include_tasks: tags on the include itself do not spread to the included tasks
+        if t.module == "include_tasks" {
+            kw.remove("tags");
+        }
         kw.remove("when");
         kw.remove("loop");
         kw.remove("loop_control");
@@ -411,6 +421,40 @@ impl Runner {
         }
     }
 
+    /// Dynamic includes print a task banner and an ok/skipped line per host, like Ansible.
+    fn include_banner(
+        &self,
+        ps: &mut PlayState,
+        act: &[usize],
+        sub: &[usize],
+        t: &Task,
+        default_name: String,
+    ) {
+        let name = t.name.clone().unwrap_or(default_name);
+        self.emit(Event::Banner {
+            kind: "TASK".into(),
+            name,
+            role: t.role.clone(),
+        });
+        for &i in act {
+            let ran = sub.contains(&i);
+            self.emit(Event::HostResult {
+                host: ps.hosts[i].name.clone(),
+                status: if ran { "ok" } else { "skipped" }.into(),
+                module: t.module.clone(),
+                item: None,
+                ignored: false,
+                result: json!({"changed": false}),
+            });
+            if ran {
+                ps.hosts[i].stats.ok += 1;
+            } else {
+                ps.hosts[i].stats.skipped += 1;
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn load_role_tree(
         &self,
         name: &str,
@@ -419,14 +463,21 @@ impl Runner {
         params: &Map<String, Value>,
         seen: &mut HashSet<String>,
         out: &mut Vec<(Role, Map<String, Value>)>,
+        force: bool,
     ) -> Result<()> {
         let role = load_role(name, play_dir, tasks_from)?;
+        // a role runs once per distinct set of parameters, unless it allows duplicates
+        let key = |n: &str, p: &Map<String, Value>| format!("{n}|{}", Value::Object(p.clone()));
         for d in &role.deps {
-            if !seen.contains(&d.name) {
-                self.load_role_tree(&d.name, play_dir, None, &d.vars, seen, out)?;
+            let dep_role_dup = load_role(&d.name, play_dir, None)
+                .map(|r| r.allow_duplicates)
+                .unwrap_or(false);
+            if dep_role_dup || !seen.contains(&key(&d.name, &d.vars)) {
+                self.load_role_tree(&d.name, play_dir, None, &d.vars, seen, out, false)?;
             }
         }
-        if seen.insert(name.to_string()) {
+        // `force`: an explicit include_role always runs the named role itself
+        if (seen.insert(key(name, params)) || force) || role.allow_duplicates {
             out.push((role, params.clone()));
         }
         Ok(())
@@ -440,6 +491,10 @@ impl Runner {
         overlay: &Map<String, Value>,
     ) -> Result<()> {
         let sub = self.include_when(ps, act, t, overlay);
+        let rname = t.args.get("name").map(vstr).unwrap_or_default();
+        if t.module == "include_role" {
+            self.include_banner(ps, act, &sub, t, format!("include_role : {rname}"));
+        }
         if sub.is_empty() {
             return Ok(());
         }
@@ -464,33 +519,51 @@ impl Runner {
         if let Some(Value::Object(v)) = t.args.get("vars") {
             params.extend(v.clone());
         }
-        let mut seen = HashSet::new();
         let mut roles = vec![];
-        self.load_role_tree(
+        // dependencies already run in this play are not repeated (same parameters)
+        let mut seen = std::mem::take(&mut ps.role_seen);
+        let loaded = self.load_role_tree(
             &name,
             &ps.play.dir,
             tf.as_deref(),
             &params,
             &mut seen,
             &mut roles,
-        )?;
+            true,
+        );
+        ps.role_seen = seen;
+        loaded?;
         for (role, params) in roles {
             for &i in &sub {
                 for (k, v) in &role.defaults {
                     ps.hosts[i].base.entry(k.clone()).or_insert(v.clone());
                 }
                 ps.hosts[i].layer.extend(role.vars.clone());
-                ps.hosts[i].params.extend(params.clone());
             }
+            let params_arc = std::sync::Arc::new(params);
             let mut tasks = role.tasks.clone();
+            crate::playbook::set_role_params(&mut tasks, &params_arc);
             let mut kw = t.kw.clone();
             for k in ["when", "name", "register", "loop"] {
                 kw.remove(k);
             }
+            // dynamic include_role: tags on the include do not spread to the role's tasks
+            if t.module == "include_role" {
+                kw.remove("tags");
+            }
             apply_inherit(&kw, &mut tasks);
             let mut hs = role.handlers.clone();
+            crate::playbook::set_role_params(&mut hs, &params_arc);
             apply_inherit(&kw, &mut hs);
-            ps.handlers.extend(hs);
+            for h in hs {
+                if !ps
+                    .handlers
+                    .iter()
+                    .any(|x| x.role == h.role && x.name == h.name && x.module == h.module)
+                {
+                    ps.handlers.push(h);
+                }
+            }
             self.run_tasks(ps, &sub, &tasks, overlay)?;
         }
         Ok(())
@@ -540,7 +613,11 @@ impl Runner {
                 } else {
                     let saved = (self.opts.tags.clone(), ());
                     let _ = saved;
-                    self.banner("RUNNING HANDLER", &title);
+                    self.emit(Event::Banner {
+                        kind: "RUNNING HANDLER".into(),
+                        name: title.clone(),
+                        role: hd2.role.clone(),
+                    });
                     self.run_leaf_nobanner(ps, &todo, &hd2, overlay)?;
                 }
             }

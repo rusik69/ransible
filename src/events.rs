@@ -108,7 +108,7 @@ impl ConsoleSink {
 
     fn banner(&self, kind: &str, name: &str, role: Option<&str>) -> String {
         let name = match role {
-            Some(r) if kind == "TASK" => format!("{r} : {name}"),
+            Some(r) if kind == "TASK" || kind == "RUNNING HANDLER" => format!("{r} : {name}"),
             _ => name.to_string(),
         };
         let head = if name.is_empty() {
@@ -116,7 +116,7 @@ impl ConsoleSink {
         } else {
             format!("{kind} [{name}] ")
         };
-        let pad = 79usize.saturating_sub(head.chars().count());
+        let pad = 80usize.saturating_sub(head.chars().count());
         format!("\n{}{}\n", head, "*".repeat(pad.max(3)))
     }
 

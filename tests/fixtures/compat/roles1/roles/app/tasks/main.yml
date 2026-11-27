@@ -1,0 +1,8 @@
+- debug: msg="app main {{ app_name }} {{ app_secret }} {{ base_msg }}"
+  tags: [app_tag]
+- include_tasks: extra.yml
+  tags: [app_tag]
+- debug: msg="never by default"
+  tags: [never, special]
+- debug: msg="always runs"
+  tags: [always]

@@ -61,10 +61,16 @@ impl Runner {
     }
 
     pub(super) fn host_ctx(&self, h: &Host, env: &TaskEnv) -> Vars {
-        self.host_ctx_t(h, env, None)
+        self.host_ctx_t(h, env, None, None)
     }
 
-    pub(super) fn host_ctx_t(&self, h: &Host, env: &TaskEnv, tvars: Option<&Vars>) -> Vars {
+    pub(super) fn host_ctx_t(
+        &self,
+        h: &Host,
+        env: &TaskEnv,
+        tvars: Option<&Vars>,
+        role_params: Option<&Vars>,
+    ) -> Vars {
         let mut v = h.base.clone();
         v.extend(h.facts.clone());
         v.extend(h.layer.clone());
@@ -73,6 +79,9 @@ impl Runner {
         }
         v.extend(h.dynv.clone());
         v.extend(h.params.clone());
+        if let Some(rp) = role_params {
+            v.extend(rp.clone());
+        }
         v.insert("inventory_hostname".into(), h.name.clone().into());
         v.insert(
             "inventory_hostname_short".into(),
@@ -137,7 +146,7 @@ impl Runner {
             Some(Value::Object(tv)) => Some(tv),
             _ => None,
         };
-        let mut v = self.host_ctx_t(h, env, tv);
+        let mut v = self.host_ctx_t(h, env, tv, t.role_params.as_deref());
         v.extend(env.overlay.clone());
         if let Some((k, val)) = item {
             v.insert(k.into(), val.clone());

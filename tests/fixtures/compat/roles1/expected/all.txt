@@ -1,0 +1,34 @@
+TASK [debug]
+ "msg": "pre from-file"
+TASK [base : debug]
+ "msg": "base role from-app-dep (dup=-)"
+TASK [base : command]
+TASK [app : debug]
+ "msg": "app main from-play from-vars-main base-default"
+TASK [app : include_tasks]
+TASK [app : debug]
+ "msg": "included extra for w1 loopvar=x"
+ "msg": "included extra for w1 loopvar=y"
+TASK [app : debug]
+ "msg": "always runs"
+TASK [dup : debug]
+ "msg": "dup role one"
+TASK [dup : debug]
+ "msg": "dup role two"
+TASK [include_role : app]
+TASK [app : debug]
+ "msg": "tasks_from other"
+TASK [app : debug]
+ "msg": "included extra for w1 loopvar=x"
+ "msg": "included extra for w1 loopvar=y"
+TASK [include_role : base]
+TASK [base : debug]
+ "msg": "base role via-include-role (dup=-)"
+TASK [base : command]
+TASK [debug]
+ "msg": "plain task from-file"
+RUNNING HANDLER [base : base handler]
+ "msg": "base handler ran on w1"
+TASK [debug]
+ "msg": "post"
+w1 ok=18 changed=2 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0

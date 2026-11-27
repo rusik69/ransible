@@ -1,0 +1,2 @@
+- debug: msg="included extra for {{ inventory_hostname }} loopvar={{ item | default('none') }}"
+  loop: [x, y]

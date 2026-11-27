@@ -1,0 +1,19 @@
+- hosts: w1
+  gather_facts: no
+  vars_files: [vars.yml]
+  pre_tasks:
+    - debug: msg="pre {{ vf_var }}"
+  roles:
+    - role: app
+      vars: {app_name: from-play}
+    - {role: dup, dup_arg: one}
+    - {role: dup, dup_arg: two}
+  tasks:
+    - include_role: {name: app, tasks_from: other}
+    - import_role: {name: app, tasks_from: extra}
+    - include_role: {name: base}
+      vars: {base_msg: via-include-role}
+    - debug: msg="plain task {{ vf_var }}"
+      tags: [plain]
+  post_tasks:
+    - debug: msg="post"

@@ -1,0 +1,3 @@
+dependencies:
+  - role: base
+    vars: {base_msg: from-app-dep}

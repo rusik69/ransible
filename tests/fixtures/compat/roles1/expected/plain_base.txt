@@ -1,0 +1,7 @@
+TASK [base : debug]
+ "msg": "base role from-app-dep (dup=-)"
+TASK [app : debug]
+ "msg": "always runs"
+TASK [debug]
+ "msg": "plain task from-file"
+w1 ok=3 changed=0 unreachable=0 failed=0 skipped=0 rescued=0 ignored=0

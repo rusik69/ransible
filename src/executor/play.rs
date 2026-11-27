@@ -80,7 +80,9 @@ impl Runner {
         let mut roles: Vec<RoleEntry> = vec![];
         for rr in &play.roles {
             let mut tmp = vec![];
-            self.load_role_tree(&rr.name, &play.dir, None, &rr.vars, &mut seen, &mut tmp)?;
+            self.load_role_tree(
+                &rr.name, &play.dir, None, &rr.vars, &mut seen, &mut tmp, false,
+            )?;
             for (r, p) in tmp {
                 let mut kw = rr.kw.clone();
                 let mut tags = to_list(kw.get("tags"));
@@ -96,19 +98,27 @@ impl Runner {
         let mut handlers: Vec<Task> = play.handlers.clone();
         let mut defaults = Map::new();
         let mut rvars = Map::new();
-        let mut rparams = Map::new();
         for (r, params, kw) in &roles {
             defaults.extend(r.defaults.clone());
             rvars.extend(r.vars.clone());
-            rparams.extend(params.clone());
+            let params_arc = std::sync::Arc::new(params.clone());
             let mut ts = r.tasks.clone();
+            crate::playbook::set_role_params(&mut ts, &params_arc);
             let mut pk = play.kw.clone();
             pk.extend(kw.clone());
             apply_inherit(&pk, &mut ts);
             role_tasks.extend(ts);
             let mut hs = r.handlers.clone();
+            crate::playbook::set_role_params(&mut hs, &params_arc);
             apply_inherit(&play.kw, &mut hs);
-            handlers.extend(hs);
+            for h in hs {
+                if !handlers
+                    .iter()
+                    .any(|x| x.role == h.role && x.name == h.name && x.module == h.module)
+                {
+                    handlers.push(h);
+                }
+            }
         }
         if self.opts.list_hosts {
             self.msg(format!(
@@ -221,7 +231,6 @@ impl Runner {
             h.layer.extend(play.vars.clone());
             h.layer.extend(vf);
             h.layer.extend(rvars.clone());
-            h.params.extend(rparams.clone());
             hosts.push(h);
         }
         drop(inv);
@@ -231,6 +240,7 @@ impl Runner {
             handlers,
             groups,
             play_hosts,
+            role_seen: seen,
         };
         // serial batches
         let total = ps.hosts.len();
@@ -279,6 +289,7 @@ impl Runner {
                                     handlers,
                                     groups,
                                     play_hosts,
+                                    role_seen: HashSet::new(),
                                 };
                                 let r = self.run_batch(&mut mini, &[0], role_tasks, ov);
                                 (i, mini.hosts.pop().unwrap(), r)

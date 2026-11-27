@@ -88,6 +88,8 @@ struct PlayState<'p> {
     handlers: Vec<Task>,
     groups: Value,
     play_hosts: Value,
+    /// roles (name|params) already run in this play, for dependency de-duplication
+    role_seen: HashSet<String>,
 }
 
 struct TaskEnv<'a> {

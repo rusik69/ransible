@@ -1,0 +1,4 @@
+- debug: msg="base role {{ base_msg }} (dup={{ dup_arg | default('-') }})"
+  tags: [base_tag]
+- command: echo base
+  notify: base handler

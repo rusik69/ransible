@@ -97,6 +97,8 @@ pub struct Task {
     pub dir: PathBuf, // base dir for files/templates lookup
     pub is_block: bool,
     pub role: Option<String>,
+    /// parameters passed to the role this task belongs to (scoped to that role)
+    pub role_params: Option<std::sync::Arc<Map<String, Value>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,6 +134,7 @@ pub struct Role {
     pub defaults: Map<String, Value>,
     pub vars: Map<String, Value>,
     pub deps: Vec<RoleRef>,
+    pub allow_duplicates: bool,
 }
 
 pub fn norm_module(m: &str) -> String {
@@ -223,28 +226,48 @@ pub fn split_raw_params(module: &str, s: &str) -> Value {
     {
         return serde_json::json!({ "_raw_params": s });
     }
-    // tokenise on whitespace outside quotes, keeping the original text of each token
+    // tokenise on whitespace outside quotes and `{{ }}` / `{% %}`, keeping each token's original text
     let mut toks: Vec<String> = vec![];
     let mut cur = String::new();
     let mut q: Option<char> = None;
-    for c in s.chars() {
+    let mut depth = 0i32;
+    let cs: Vec<char> = s.chars().collect();
+    let mut k = 0;
+    while k < cs.len() {
+        let c = cs[k];
+        let two = cs.get(k + 1).map(|n| (c, *n));
+        if matches!(two, Some(('{', '{')) | Some(('{', '%'))) {
+            depth += 1;
+            cur.push(c);
+            cur.push(cs[k + 1]);
+            k += 2;
+            continue;
+        }
+        if depth > 0 && matches!(two, Some(('}', '}')) | Some(('%', '}'))) {
+            depth -= 1;
+            cur.push(c);
+            cur.push(cs[k + 1]);
+            k += 2;
+            continue;
+        }
         match (q, c) {
-            (Some(qc), c) if c == qc => {
+            (Some(qc), c) if c == qc && depth == 0 => {
                 q = None;
                 cur.push(c);
             }
             (Some(_), c) => cur.push(c),
-            (None, '"') | (None, '\'') => {
+            (None, '"') | (None, '\'') if depth == 0 => {
                 q = Some(c);
                 cur.push(c);
             }
-            (None, c) if c.is_whitespace() => {
+            (None, c) if c.is_whitespace() && depth == 0 => {
                 if !cur.is_empty() {
                     toks.push(std::mem::take(&mut cur));
                 }
             }
             (None, c) => cur.push(c),
         }
+        k += 1;
     }
     if !cur.is_empty() {
         toks.push(cur);
@@ -311,7 +334,11 @@ pub fn parse_kv(s: &str) -> Option<Map<String, Value>> {
     }
     for t in toks {
         let (k, v) = t.split_once('=')?;
-        if k.is_empty() || !k.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        if k.is_empty()
+            || !k
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             return None;
         }
         out.insert(k.to_string(), Value::String(v.to_string()));
@@ -663,6 +690,18 @@ fn main_file(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Attach role parameters to every task (recursively) that does not have any yet.
+pub fn set_role_params(ts: &mut [Task], p: &std::sync::Arc<Map<String, Value>>) {
+    for t in ts {
+        if t.role_params.is_none() {
+            t.role_params = Some(p.clone());
+        }
+        set_role_params(&mut t.block, p);
+        set_role_params(&mut t.rescue, p);
+        set_role_params(&mut t.always, p);
+    }
+}
+
 pub fn tag_role(ts: &mut [Task], role: &str) {
     for t in ts {
         if t.role.is_none() {
@@ -714,6 +753,10 @@ pub fn load_role(name: &str, play_dir: &Path, tasks_from: Option<&str>) -> Resul
     if let Some(f) = main_file(&path.join("meta"))
         && let Value::Object(m) = read_yaml(&f)?
     {
+        role.allow_duplicates = m
+            .get("allow_duplicates")
+            .and_then(loose_bool)
+            .unwrap_or(false);
         for d in as_list(m.get("dependencies")) {
             let name = match &d {
                 Value::String(s) => s.clone(),
@@ -731,8 +774,15 @@ pub fn load_role(name: &str, play_dir: &Path, tasks_from: Option<&str>) -> Resul
             };
             if let Value::Object(o) = &d {
                 for (k, v) in o {
-                    if k != "role" && k != "name" {
-                        rr.vars.insert(k.clone(), v.clone());
+                    if k == "role" || k == "name" {
+                        continue;
+                    }
+                    // `vars: {a: 1}` and bare `a: 1` both pass role parameters
+                    match (k.as_str(), v) {
+                        ("vars", Value::Object(m)) => rr.vars.extend(m.clone()),
+                        _ => {
+                            rr.vars.insert(k.clone(), v.clone());
+                        }
                     }
                 }
             }
@@ -745,6 +795,19 @@ pub fn load_role(name: &str, play_dir: &Path, tasks_from: Option<&str>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_params_keep_templates_intact() {
+        let v = split_raw_params(
+            "command",
+            "{{ bin }} global require {{ item.name }}:{{ item.rel | default('x') }} creates={{ home }}/vendor/{{ item.name }}",
+        );
+        assert_eq!(
+            v["_raw_params"],
+            "{{ bin }} global require {{ item.name }}:{{ item.rel | default('x') }}"
+        );
+        assert_eq!(v["creates"], "{{ home }}/vendor/{{ item.name }}");
+    }
 
     #[test]
     fn raw_params_option_extraction() {
