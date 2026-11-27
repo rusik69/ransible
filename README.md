@@ -31,7 +31,8 @@ Open the printed URL. On first start an `admin` user is created (generated passw
 - **API:** `/api/v2/` with AWX-style resources and pagination (`count/next/previous/results`, `?page`, `?page_size`, `?search`, `?order_by`); Bearer tokens (`POST /api/v2/auth/login/`) or HTTP Basic. Launch: `POST /api/v2/job_templates/{id}/launch/`. Live output: `GET /api/v2/jobs/{id}/stream/` (SSE).
 - **Isolation:** each job runs the same binary as a subprocess with a minimal environment; credentials are written to a 0700 per-job directory (0600 files) that is deleted afterwards.
 - Lean CLI-only build: `cargo build --release --no-default-features`.
-- Not yet: schedules, notifications, workflows, teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
+- **Schedules** (cron, UTC), **notifications** (webhook / Slack on start, success, failure; URL stored encrypted), **activity stream** (audit trail of changes and launches).
+- Not yet: workflows, teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
 
 ## Platforms
 Release binaries (GitHub Releases, with SHA256SUMS and build provenance): Linux x86_64/aarch64 (glibc and static musl), macOS x86_64/aarch64, Windows x86_64/aarch64 (SSH controller; the `local` connection needs a POSIX `sh`). Targets must pass `make check-targets`.

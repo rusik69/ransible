@@ -40,6 +40,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   started TEXT, finished TEXT, rc INTEGER, summary TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS job_events (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, seq INTEGER NOT NULL, event TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '',
+  template_id INTEGER NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+  extra_vars TEXT NOT NULL DEFAULT '', last_run TEXT, created TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS notification_templates (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'webhook', webhook_url TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+  on_start INTEGER NOT NULL DEFAULT 0, on_success INTEGER NOT NULL DEFAULT 0, on_failure INTEGER NOT NULL DEFAULT 1,
+  created TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS activity_stream (
+  id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now')), username TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL, object_type TEXT NOT NULL DEFAULT '', object_id INTEGER, summary TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 "#;
 

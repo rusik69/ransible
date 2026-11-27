@@ -32,7 +32,7 @@ Offline tests (`cargo test`) additionally pin variable precedence to real Ansibl
 | `async`/`poll: 0` + `async_status`, `max_fail_percentage`, `any_errors_fatal`, rescue vars (`ansible_failed_task/result`) | done |
 | `ansible.cfg` + `ANSIBLE_*` env, SSH password (needs `sshpass`) and become password, `docker`/`podman` connections, `-k/-K/-T/--start-at-task/--list-tags`, `ansible-playbook`/`ansible`/`ansible-vault` argv0 names, shell completions | done |
 | `strategy: free`, `add_host`, `group_by`, collections/Galaxy, vault ids | not yet |
-| AWX-style web UI + REST API in the same binary (`ransible serve`): projects, inventories, credentials, templates, jobs with live output, users/roles, dashboard | done (schedules, notifications, workflows, teams: planned) |
+| AWX-style web UI + REST API in the same binary (`ransible serve`): projects, inventories, credentials, templates, jobs with live output, users/roles, dashboard | done incl. schedules, notifications, activity stream (workflows, teams, OIDC/LDAP, remote workers: planned) |
 
 ## Modules (native)
 command shell raw script copy template file lineinfile blockinfile replace stat slurp find debug set_fact include_vars fail assert ping pause wait_for wait_for_connection meta setup service_facts package_facts getent apt yum dnf package apk homebrew apt_repository apt_key deb822_repository pip service systemd user group authorized_key cron timezone hostname locale_gen tempfile unarchive git get_url uri fetch synchronize mysql_db mysql_user mysql_query mysql_variables async_status ini_file sysctl known_hosts reboot set_stats assemble archive npm gem debconf snap ufw firewalld yum_repository rpm_key alternatives mount modprobe selinux git_config.

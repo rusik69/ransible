@@ -30,7 +30,7 @@ await api('/credentials/', 'POST', { name: 'c', username: 'u', secrets: { passwo
 const tpl = await api('/job_templates/', 'POST', { name: 't', project_id: proj.id, playbook: 'site.yml', inventory_id: inv.id });
 const job = await api(`/job_templates/${tpl.id}/launch/`, 'POST', {});
 await sleep(2500);
-for (const v of ['dashboard', 'jobs', 'jobs/' + job.id, 'templates', 'projects', 'inventories', 'credentials', 'users', 'account']) {
+for (const v of ['dashboard', 'jobs', 'jobs/' + job.id, 'templates', 'schedules', 'projects', 'inventories', 'credentials', 'notifications', 'activity', 'users', 'account']) {
   w.location.hash = '#/' + v; await sleep(500);
   const t = text();
   if (w.document.querySelector('.toast.err')) errors.push(v + ': error toast: ' + w.document.querySelector('.toast.err').textContent);

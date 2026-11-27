@@ -80,12 +80,12 @@ const all = async (res) => (await api(`/${res}/?page_size=200`)).results;
 const nameOf = (list, id) => (list.find((x) => x.id === id) || {}).name || '—';
 
 // ---------- shell ----------
-const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['users', 'Users']];
+const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['users', 'Users']];
 function shell(route, content) {
   closeLive();
   $app.replaceChildren(h('div', { class: 'layout' },
     h('nav', { class: 'side' }, h('div', { class: 'brand' }, h('i', {}, 'R'), 'Ransible'),
-      NAV.filter(([k]) => k !== 'users' || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
+      NAV.filter(([k]) => !['users', 'notifications'].includes(k) || me.role === 'admin').map(([k, t]) => h('a', { class: 'nav' + (route === k ? ' active' : ''), href: '#/' + k }, t)),
       h('div', { class: 'spacer' }), h('div', { class: 'who' }, me.username + ' · ' + me.role),
       h('a', { class: 'nav', href: '#/account' }, 'Account'), h('a', { class: 'nav', href: '#', onclick: (e) => { e.preventDefault(); logout(); } }, 'Sign out')),
     h('main', { class: 'main' }, content)));
@@ -180,6 +180,25 @@ const users = crud({ res: 'users', title: 'Users', single: 'user', empty: '',
   fields: (_c, row) => [{ name: 'username', label: 'Username' }, { name: 'role', label: 'Role', type: 'select', options: ['viewer', 'operator', 'admin'] }, { name: 'password', label: row ? 'New password (blank = keep)' : 'Password (min 8 chars)', type: 'password' }],
   beforeSave: (b) => { if (!b.password) delete b.password; },
   columns: () => [{ title: 'Username', render: (u) => u.username }, { title: 'Role', render: (u) => u.role }, { title: 'Created', render: (u) => when(u.created) }] });
+const schedules = async () => {
+  const tpls = await all('job_templates');
+  return crud({ res: 'schedules', title: 'Schedules', single: 'schedule', empty: 'Schedules launch a template on a cron expression (UTC), e.g. */15 * * * * or @daily.',
+    defaults: { cron: '0 * * * *', enabled: true },
+    toForm: (s) => ({ ...s, enabled: !!s.enabled }),
+    fields: () => [{ name: 'name', label: 'Name' }, { name: 'template_id', label: 'Job template', type: 'select', options: tpls.map((t) => ({ value: t.id, label: t.name })), nullEmpty: true },
+      { name: 'cron', label: 'Cron (min hour day month weekday, UTC)', placeholder: '*/15 * * * *' }, { name: 'extra_vars', label: 'Extra variables (YAML/JSON, merged over the template)', type: 'textarea' }, { name: 'enabled', label: 'Enabled', type: 'checkbox' }],
+    columns: () => [{ title: 'Name', render: (s) => s.name }, { title: 'Template', render: (s) => nameOf(tpls, s.template_id) }, { title: 'Cron', render: (s) => h('code', {}, s.cron) }, { title: 'Enabled', render: (s) => (s.enabled ? 'yes' : 'no') }, { title: 'Last run', render: (s) => when(s.last_run) }] })();
+};
+const notifications = crud({ res: 'notification_templates', title: 'Notification templates', single: 'notification', empty: 'Send a webhook or Slack message when jobs start, succeed or fail.',
+  defaults: { kind: 'webhook', enabled: true, on_failure: true },
+  toForm: (n) => ({ ...n, webhook_url: '', enabled: !!n.enabled, on_start: !!n.on_start, on_success: !!n.on_success, on_failure: !!n.on_failure }),
+  fields: (_c, row) => [{ name: 'name', label: 'Name' }, { name: 'kind', label: 'Type', type: 'select', options: ['webhook', 'slack'], half: true }, { name: 'webhook_url', label: row ? 'URL (blank = keep)' : 'URL', half: true, skipEmpty: !!row },
+    { name: 'on_start', label: 'On start', type: 'checkbox', half: true }, { name: 'on_success', label: 'On success', type: 'checkbox', half: true }, { name: 'on_failure', label: 'On failure', type: 'checkbox', half: true }, { name: 'enabled', label: 'Enabled', type: 'checkbox', half: true }],
+  columns: () => [{ title: 'Name', render: (n) => n.name }, { title: 'Type', render: (n) => n.kind }, { title: 'When', render: (n) => [n.on_start && 'start', n.on_success && 'success', n.on_failure && 'failure'].filter(Boolean).join(', ') }, { title: 'Enabled', render: (n) => (n.enabled ? 'yes' : 'no') }] });
+async function activity() {
+  const rows = (await api('/activity_stream/?page_size=100&order_by=-id')).results;
+  shell('activity', [h('h1', {}, 'Activity stream'), table([{ title: 'Time', render: (a) => when(a.ts) }, { title: 'User', render: (a) => a.username }, { title: 'Action', render: (a) => a.action }, { title: 'Object', render: (a) => a.object_type + (a.object_id ? ' #' + a.object_id : '') }, { title: 'Summary', render: (a) => a.summary }], rows, 'No activity yet.')]);
+}
 const templates = async () => {
   const [rows, projs, invs, creds] = await Promise.all([all('job_templates'), all('projects'), all('inventories'), all('credentials')]);
   const opt = (l, none) => [{ value: '', label: none }, ...l.map((x) => ({ value: x.id, label: x.name }))];
@@ -217,7 +236,7 @@ async function route() {
   try {
     if (!me) me = await api('/me/');
     const [r, arg] = (location.hash.replace(/^#\//, '') || 'dashboard').split('/');
-    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, projects, inventories, credentials, users, account };
+    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, schedules, projects, inventories, credentials, notifications, activity, users, account };
     await (views[r] || dashboard)();
   } catch (e) { if (token) toast(e.message, true); }
 }

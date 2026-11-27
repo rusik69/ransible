@@ -1,4 +1,5 @@
 //! `ransible serve`: AWX-style REST API (`/api/v2/`) and embedded web UI in the same binary.
+mod cron;
 mod db;
 mod jobs;
 
@@ -30,6 +31,18 @@ pub struct AppState {
     pub live: Arc<Mutex<HashMap<i64, jobs::Live>>>,
     pub sem: Arc<tokio::sync::Semaphore>,
     pub login_failures: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+}
+
+impl AppState {
+    /// Append to the audit trail (activity stream).
+    pub fn activity(&self, user: &str, action: &str, otype: &str, oid: i64, summary: &str) {
+        if let Ok(c) = self.db.lock() {
+            let _ = c.execute(
+                "INSERT INTO activity_stream (username, action, object_type, object_id, summary) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![user, action, otype, oid, summary],
+            );
+        }
+    }
 }
 
 pub struct Options {
@@ -229,6 +242,36 @@ fn resource(name: &str) -> Option<Res> {
             ],
             write: "write",
         },
+        "schedules" => Res {
+            table: "schedules",
+            cols: &[
+                "name",
+                "description",
+                "template_id",
+                "cron",
+                "enabled",
+                "extra_vars",
+            ],
+            write: "write",
+        },
+        "notification_templates" => Res {
+            table: "notification_templates",
+            cols: &[
+                "name",
+                "description",
+                "kind",
+                "enabled",
+                "on_start",
+                "on_success",
+                "on_failure",
+            ],
+            write: "write",
+        },
+        "activity_stream" => Res {
+            table: "activity_stream",
+            cols: &["ts", "username", "action", "object_type"],
+            write: "write",
+        },
         "users" => Res {
             table: "users",
             cols: &["username", "role"],
@@ -273,6 +316,17 @@ fn sanitize(state: &AppState, res: &str, mut row: Map<String, Value>) -> Map<Str
                     .map(|k| (k, Value::String("$encrypted$".into())))
                     .collect(),
             ),
+        );
+    }
+    if res == "notification_templates" {
+        let set = row
+            .get("webhook_url")
+            .and_then(|u| u.as_str())
+            .map(|u| !u.is_empty())
+            .unwrap_or(false);
+        row.insert(
+            "webhook_url".into(),
+            if set { "$encrypted$".into() } else { "".into() },
         );
     }
     if res == "jobs" {
@@ -412,6 +466,51 @@ fn prepare_body(
                 return Err(bad("kind must be machine or vault"));
             }
         }
+        "schedules" => {
+            if let Some(c) = body.get("cron").and_then(|c| c.as_str())
+                && !cron::validate(c)
+            {
+                return Err(bad(
+                    "cron must be 5 fields (min hour dom mon dow) or @hourly/@daily/@weekly/@monthly",
+                ));
+            }
+            if let Some(Value::Bool(b)) = body.get("enabled").cloned() {
+                body.insert("enabled".into(), (b as i64).into());
+            }
+            if let Some(ev) = body.get("extra_vars")
+                && !ev.is_string()
+            {
+                body.insert("extra_vars".into(), ev.to_string().into());
+            }
+        }
+        "notification_templates" => {
+            if let Some(k) = body.get("kind").and_then(|k| k.as_str())
+                && !["webhook", "slack"].contains(&k)
+            {
+                return Err(bad("kind must be webhook or slack"));
+            }
+            for k in ["enabled", "on_start", "on_success", "on_failure"] {
+                if let Some(Value::Bool(b)) = body.get(k).cloned() {
+                    body.insert(k.into(), (b as i64).into());
+                }
+            }
+            if let Some(u) = body
+                .get("webhook_url")
+                .and_then(|u| u.as_str())
+                .map(String::from)
+            {
+                if u == "$encrypted$" {
+                    body.remove("webhook_url");
+                } else if !(u.starts_with("http://") || u.starts_with("https://")) {
+                    return Err(bad("webhook_url must start with http:// or https://"));
+                } else {
+                    body.insert(
+                        "webhook_url".into(),
+                        db::encrypt_secret(&st.master, &u)?.into(),
+                    );
+                }
+            }
+        }
         "inventories" => {
             if let Some(k) = body.get("kind").and_then(|k| k.as_str())
                 && !["static", "script"].contains(&k)
@@ -450,6 +549,7 @@ fn extra_cols(name: &str) -> &'static [&'static str] {
     match name {
         "users" => &["pw_hash"],
         "credentials" => &["secrets"],
+        "notification_templates" => &["webhook_url"],
         _ => &[],
     }
 }
@@ -461,7 +561,7 @@ async fn create_res(
     Json(mut body): Json<Map<String, Value>>,
 ) -> R<(StatusCode, Json<Value>)> {
     let res = resource(&name).ok_or_else(not_found)?;
-    if name == "jobs" || !u.can(res.write) {
+    if name == "jobs" || name == "activity_stream" || !u.can(res.write) {
         return Err(forbidden());
     }
     if name == "users" && !body.contains_key("password") {
@@ -484,6 +584,21 @@ async fn create_res(
         let id = db::insert(&c, res.table, &cols, &body)?;
         db::get(&c, res.table, id)?.ok_or_else(not_found)?
     };
+    let rid = row.get("id").and_then(|i| i.as_i64()).unwrap_or(0);
+    st.activity(
+        &u.username,
+        "create",
+        &name,
+        rid,
+        &format!(
+            "created {} {}",
+            name,
+            row.get("name")
+                .or(row.get("username"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+        ),
+    );
     Ok((
         StatusCode::CREATED,
         Json(Value::Object(sanitize(&st, &name, row))),
@@ -497,7 +612,7 @@ async fn update_res(
     Json(mut body): Json<Map<String, Value>>,
 ) -> R {
     let res = resource(&name).ok_or_else(not_found)?;
-    if name == "jobs" || !u.can(res.write) {
+    if name == "jobs" || name == "activity_stream" || !u.can(res.write) {
         return Err(forbidden());
     }
     let existing = {
@@ -512,6 +627,20 @@ async fn update_res(
         db::update(&c, res.table, &cols, id, &body)?;
         db::get(&c, res.table, id)?.ok_or_else(not_found)?
     };
+    st.activity(
+        &u.username,
+        "update",
+        &name,
+        id,
+        &format!(
+            "updated {} {}",
+            name,
+            row.get("name")
+                .or(row.get("username"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+        ),
+    );
     Ok(Json(Value::Object(sanitize(&st, &name, row))))
 }
 
@@ -521,7 +650,7 @@ async fn delete_res(
     Path((name, id)): Path<(String, i64)>,
 ) -> R<StatusCode> {
     let res = resource(&name).ok_or_else(not_found)?;
-    if !u.can(res.write) {
+    if name == "activity_stream" || !u.can(res.write) {
         return Err(forbidden());
     }
     if name == "users" && id == u.id {
@@ -537,6 +666,14 @@ async fn delete_res(
     if !db::delete(&c, res.table, id)? {
         return Err(not_found());
     }
+    drop(c);
+    st.activity(
+        &u.username,
+        "delete",
+        &name,
+        id,
+        &format!("deleted {name} {id}"),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -799,6 +936,27 @@ async fn inventory_hosts(State(st): State<AppState>, _u: AuthUser, Path(id): Pat
 
 // ---------- jobs ----------
 
+/// Insert a job for `template` (with launch-time overrides) and start it.
+fn create_job(
+    st: &AppState,
+    template: &Map<String, Value>,
+    overrides: &Map<String, Value>,
+    by: &str,
+) -> Result<i64> {
+    let params = jobs::resolve_launch(template, overrides);
+    let job_type = params["job_type"].as_str().unwrap_or("run").to_string();
+    let job_id = {
+        let c = st.db.lock().unwrap();
+        c.execute(
+            "INSERT INTO jobs (template_id, name, launched_by, job_type, playbook, params) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![template["id"].as_i64(), template["name"].as_str().unwrap_or(""), by, job_type, template["playbook"].as_str().unwrap_or(""), params.to_string()],
+        )?;
+        c.last_insert_rowid()
+    };
+    tokio::spawn(jobs::run_job(st.clone(), job_id));
+    Ok(job_id)
+}
+
 async fn launch(
     State(st): State<AppState>,
     u: AuthUser,
@@ -820,17 +978,17 @@ async fn launch(
     if template["project_id"].is_null() || template["playbook"].as_str().unwrap_or("").is_empty() {
         return Err(bad("template needs a project and a playbook"));
     }
-    let params = jobs::resolve_launch(&template, &overrides);
-    let job_type = params["job_type"].as_str().unwrap_or("run").to_string();
-    let job_id = {
-        let c = st.db.lock().unwrap();
-        c.execute(
-            "INSERT INTO jobs (template_id, name, launched_by, job_type, playbook, params) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id, template["name"].as_str().unwrap_or(""), u.username, job_type, template["playbook"].as_str().unwrap_or(""), params.to_string()],
-        )?;
-        c.last_insert_rowid()
-    };
-    tokio::spawn(jobs::run_job(st.clone(), job_id));
+    let job_id = create_job(&st, &template, &overrides, &u.username)?;
+    st.activity(
+        &u.username,
+        "launch",
+        "job",
+        job_id,
+        &format!(
+            "launched template {}",
+            template["name"].as_str().unwrap_or("")
+        ),
+    );
     let row = {
         let c = st.db.lock().unwrap();
         db::get(&c, "jobs", job_id)?.ok_or_else(not_found)?
@@ -862,6 +1020,13 @@ async fn relaunch(
         c.last_insert_rowid()
     };
     tokio::spawn(jobs::run_job(st.clone(), job_id));
+    st.activity(
+        &u.username,
+        "relaunch",
+        "job",
+        job_id,
+        &format!("relaunched job {id}"),
+    );
     let row = {
         let c = st.db.lock().unwrap();
         db::get(&c, "jobs", job_id)?.ok_or_else(not_found)?
@@ -879,6 +1044,7 @@ async fn cancel_job(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>
     let cancel = st.live.lock().unwrap().get(&id).map(|l| l.cancel.clone());
     match cancel {
         Some(n) => {
+            st.activity(&u.username, "cancel", "job", id, "canceled job");
             n.notify_one();
             Ok(Json(json!({"canceled": true})))
         }
@@ -993,7 +1159,7 @@ async fn dashboard(State(st): State<AppState>, _u: AuthUser) -> R {
         &[],
     )?;
     Ok(Json(json!({
-        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users")},
+        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users"), "schedules": count("schedules")},
         "jobs_by_status": by_status,
         "recent_jobs": recent,
     })))
@@ -1154,6 +1320,65 @@ fn bootstrap_admin(st: &AppState, password: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Fire schedules whose cron expression matches the current minute (UTC).
+async fn scheduler(st: AppState) {
+    let mut last_minute = -1i64;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let minute = now / 60;
+        if minute == last_minute {
+            continue;
+        }
+        last_minute = minute;
+        let due: Vec<Map<String, Value>> = {
+            let c = st.db.lock().unwrap();
+            db::query(&c, "SELECT * FROM schedules WHERE enabled = 1", &[]).unwrap_or_default()
+        };
+        for s in due {
+            if !cron::matches(s["cron"].as_str().unwrap_or(""), minute * 60) {
+                continue;
+            }
+            let template = {
+                let c = st.db.lock().unwrap();
+                s["template_id"]
+                    .as_i64()
+                    .and_then(|id| db::get(&c, "job_templates", id).ok().flatten())
+            };
+            let Some(template) = template else { continue };
+            let mut overrides = Map::new();
+            if let Some(text) = s["extra_vars"].as_str().filter(|t| !t.trim().is_empty()) {
+                let mut merged = match crate::playbook::parse_yaml_str(
+                    template["extra_vars"].as_str().unwrap_or(""),
+                ) {
+                    Ok(Value::Object(o)) => o,
+                    _ => Map::new(),
+                };
+                if let Ok(Value::Object(o)) = crate::playbook::parse_yaml_str(text) {
+                    merged.extend(o);
+                }
+                overrides.insert("extra_vars".into(), Value::Object(merged));
+            }
+            let by = format!("schedule:{}", s["name"].as_str().unwrap_or(""));
+            match create_job(&st, &template, &overrides, &by) {
+                Ok(job_id) => {
+                    st.activity(&by, "launch", "job", job_id, "launched by schedule");
+                    if let Ok(c) = st.db.lock() {
+                        let _ = c.execute(
+                            "UPDATE schedules SET last_run = datetime('now') WHERE id = ?1",
+                            [s["id"].as_i64()],
+                        );
+                    }
+                }
+                Err(e) => eprintln!("ransible: schedule {} failed to launch: {e:#}", by),
+            }
+        }
+    }
+}
+
 pub async fn serve(opts: Options) -> Result<()> {
     std::fs::create_dir_all(&opts.data_dir)?;
     let conn = db::open(&opts.data_dir.join("ransible.db"))?;
@@ -1164,6 +1389,7 @@ pub async fn serve(opts: Options) -> Result<()> {
         let c = st.db.lock().unwrap();
         c.execute("UPDATE jobs SET status = 'error', finished = datetime('now') WHERE status IN ('pending','running')", [])?;
     }
+    tokio::spawn(scheduler(st.clone()));
     let app = router(st);
     let listener = tokio::net::TcpListener::bind(&opts.listen)
         .await

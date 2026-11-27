@@ -273,6 +273,81 @@ fn prepare(state: &AppState, job_id: i64, params: &Map<String, Value>) -> Result
     })
 }
 
+/// Send webhook/Slack notifications for a job event (`start`, or a final status).
+pub async fn notify(state: AppState, job_id: i64, event: String) {
+    let (job, hooks) = {
+        let Ok(c) = state.db.lock() else { return };
+        let job = db::get(&c, "jobs", job_id).ok().flatten();
+        let col = match event.as_str() {
+            "start" => "on_start",
+            "successful" => "on_success",
+            "failed" | "error" => "on_failure",
+            _ => return,
+        };
+        let hooks = db::query(
+            &c,
+            &format!("SELECT * FROM notification_templates WHERE enabled = 1 AND {col} = 1"),
+            &[],
+        )
+        .unwrap_or_default();
+        (job, hooks)
+    };
+    let Some(job) = job else { return };
+    let base = std::env::var("RANSIBLE_EXTERNAL_URL").unwrap_or_default();
+    let link = format!("{}/#/jobs/{job_id}", base.trim_end_matches('/'));
+    let label = if event == "start" {
+        "started".to_string()
+    } else {
+        event.clone()
+    };
+    for h in hooks {
+        let Ok(url) = db::decrypt_secret(&state.master, h["webhook_url"].as_str().unwrap_or(""))
+        else {
+            continue;
+        };
+        if url.is_empty() {
+            continue;
+        }
+        let payload = if h["kind"].as_str() == Some("slack") {
+            json!({"text": format!("Job #{job_id} {} {label} {link}", job["name"].as_str().unwrap_or(""))})
+        } else {
+            json!({"id": job_id, "name": job["name"], "status": label, "playbook": job["playbook"], "launched_by": job["launched_by"], "url": link})
+        };
+        let mut c = tokio::process::Command::new("curl");
+        c.args([
+            "-sS",
+            "-m",
+            "10",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &payload.to_string(),
+            "-K",
+            "-",
+        ]);
+        c.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Ok(mut child) = c.spawn() {
+            if let Some(mut si) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = si
+                    .write_all(
+                        format!(
+                            "url = \"{}\"\n",
+                            url.replace('\\', "\\\\").replace('"', "\\\"")
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+            let _ = child.wait().await;
+        }
+    }
+}
+
 pub async fn run_job(state: AppState, job_id: i64) {
     let live = {
         let (tx, _) = broadcast::channel(1024);
@@ -308,6 +383,8 @@ pub async fn run_job(state: AppState, job_id: i64) {
             "UPDATE jobs SET status = ?1, finished = datetime('now'), rc = ?2, summary = ?3 WHERE id = ?4",
             rusqlite::params![status, rc, summary, job_id],
         );
+        drop(c);
+        tokio::spawn(notify(state.clone(), job_id, status.to_string()));
     };
     let mut seq: i64 = 0;
     let mut emit = |ev: Event, tx: &broadcast::Sender<LiveMsg>| {
@@ -333,6 +410,7 @@ pub async fn run_job(state: AppState, job_id: i64) {
         return;
     };
     set_status(&state, job_id, ", started = datetime('now')", "running");
+    tokio::spawn(notify(state.clone(), job_id, "start".into()));
 
     let params: Map<String, Value> = {
         let c = state.db.lock().unwrap();

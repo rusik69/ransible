@@ -497,3 +497,185 @@ fn cancel_running_job() {
         "cancel must not wait for the 30s sleep"
     );
 }
+
+#[test]
+fn schedules_notifications_and_activity() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start("misc");
+    let tok = j(login(&s, "admin", "admin-password-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // webhook receiver
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook_port = listener.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming().flatten().take(4) {
+            let mut stream = stream;
+            let mut buf = [0u8; 8192];
+            let mut got = Vec::new();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        if let Some(i) = text.find("\r\n\r\n") {
+                            let cl = text
+                                .to_lowercase()
+                                .split("content-length: ")
+                                .nth(1)
+                                .and_then(|r| r.split("\r\n").next())
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if got.len() >= i + 4 + cl {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let text = String::from_utf8_lossy(&got).to_string();
+            let _ = tx.send(text.split("\r\n\r\n").nth(1).unwrap_or("").to_string());
+        }
+    });
+    // invalid inputs
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/notification_templates/",
+            Some(&tok),
+            Some(json!({"name": "n", "webhook_url": "ftp://x"}))
+        )
+        .0,
+        400
+    );
+    let n = j(curl(
+        &s,
+        "POST",
+        "/api/v2/notification_templates/",
+        Some(&tok),
+        Some(
+            json!({"name": "hook", "kind": "webhook", "webhook_url": format!("http://127.0.0.1:{hook_port}/hook"), "on_success": true, "on_failure": true}),
+        ),
+    ));
+    assert_eq!(n["webhook_url"], "$encrypted$");
+    assert!(
+        !curl(
+            &s,
+            "GET",
+            "/api/v2/notification_templates/",
+            Some(&tok),
+            None
+        )
+        .1
+        .contains("127.0.0.1")
+    );
+
+    let proj_dir = s.dir.join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(
+        proj_dir.join("site.yml"),
+        "- hosts: all\n  gather_facts: no\n  tasks:\n    - debug: msg=hi\n",
+    )
+    .unwrap();
+    let pid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/projects/",
+        Some(&tok),
+        Some(json!({"name": "p", "local_path": proj_dir.to_str().unwrap()})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let iid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/inventories/",
+        Some(&tok),
+        Some(json!({"name": "i", "content": "localhost ansible_connection=local\n"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let tid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/job_templates/",
+        Some(&tok),
+        Some(json!({"name": "t", "project_id": pid, "playbook": "site.yml", "inventory_id": iid})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+
+    // schedules: validation + CRUD
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/schedules/",
+            Some(&tok),
+            Some(json!({"name": "bad", "template_id": tid, "cron": "nope"}))
+        )
+        .0,
+        400
+    );
+    let sc = j(curl(
+        &s,
+        "POST",
+        "/api/v2/schedules/",
+        Some(&tok),
+        Some(json!({"name": "nightly", "template_id": tid, "cron": "0 3 * * *", "enabled": true})),
+    ));
+    assert_eq!(sc["cron"], "0 3 * * *");
+    assert_eq!(sc["enabled"], 1);
+
+    let id = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/job_templates/{tid}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(wait_job(&s, &tok, id)["status"], "successful");
+    let body = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("webhook not delivered");
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["status"], "successful");
+    assert_eq!(payload["id"], id);
+
+    // audit trail
+    let act = curl(
+        &s,
+        "GET",
+        "/api/v2/activity_stream/?page_size=100",
+        Some(&tok),
+        None,
+    )
+    .1;
+    assert!(
+        act.contains("\"launch\"") && act.contains("\"create\""),
+        "{act}"
+    );
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            "/api/v2/activity_stream/",
+            Some(&tok),
+            Some(json!({"action": "x"}))
+        )
+        .0,
+        403
+    );
+}
