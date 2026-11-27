@@ -243,6 +243,15 @@ enum Cmd {
         common: Common,
         #[arg(default_value = "all")]
         pattern: String,
+        /// Output the whole inventory as JSON (ansible-inventory --list)
+        #[arg(long)]
+        list: bool,
+        /// Output the group/host tree (ansible-inventory --graph)
+        #[arg(long)]
+        graph: bool,
+        /// Output the variables of one host as JSON
+        #[arg(long)]
+        host: Option<String>,
     },
 }
 
@@ -763,10 +772,39 @@ fn run() -> Result<i32> {
             runner.run_play(&play)?;
             Ok(runner.recap())
         }
-        Cmd::Inventory { common, pattern } => {
+        Cmd::Inventory {
+            common,
+            pattern,
+            list,
+            graph,
+            host,
+        } => {
             let runner = build_runner(&common, Path::new("."))?;
-            for h in runner.inv.read().unwrap().select(&pattern) {
-                println!("{h}");
+            let inv = runner.inv.read().unwrap();
+            if list {
+                println!(
+                    "{}",
+                    pyfmt::json_dumps(&inv.to_list_json(), Some(4), true, true)
+                );
+            } else if graph {
+                print!("{}", inv.to_graph());
+            } else if let Some(h) = host {
+                if !inv.hosts.contains(&h) {
+                    return Err(anyhow!("host '{h}' not found in the inventory"));
+                }
+                println!(
+                    "{}",
+                    pyfmt::json_dumps(
+                        &serde_json::Value::Object(inv.vars_for(&h)),
+                        Some(4),
+                        true,
+                        true
+                    )
+                );
+            } else {
+                for h in inv.select(&pattern) {
+                    println!("{h}");
+                }
             }
             Ok(0)
         }

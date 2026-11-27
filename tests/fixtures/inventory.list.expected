@@ -1,0 +1,49 @@
+{
+    "_meta": {
+        "hostvars": {
+            "db1": {
+                "ansible_connection": "local",
+                "env": "production",
+                "greeting": "hello",
+                "out_dir": "{{ lookup('env', 'RANSIBLE_OUT') | default('/tmp/ransible-test', true) }}"
+            },
+            "web1": {
+                "ansible_connection": "local",
+                "env": "production",
+                "greeting": "hello",
+                "http_port": 8081,
+                "out_dir": "{{ lookup('env', 'RANSIBLE_OUT') | default('/tmp/ransible-test', true) }}"
+            },
+            "web2": {
+                "ansible_connection": "local",
+                "env": "production",
+                "greeting": "hi from web2",
+                "out_dir": "{{ lookup('env', 'RANSIBLE_OUT') | default('/tmp/ransible-test', true) }}"
+            }
+        },
+        "profile": "inventory_legacy"
+    },
+    "all": {
+        "children": [
+            "ungrouped",
+            "prod"
+        ]
+    },
+    "db": {
+        "hosts": [
+            "db1"
+        ]
+    },
+    "prod": {
+        "children": [
+            "web",
+            "db"
+        ]
+    },
+    "web": {
+        "hosts": [
+            "web1",
+            "web2"
+        ]
+    }
+}

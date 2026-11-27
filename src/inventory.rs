@@ -13,7 +13,7 @@ pub struct Group {
 
 #[derive(Default, Debug)]
 pub struct Inventory {
-    pub groups: BTreeMap<String, Group>,
+    pub groups: indexmap::IndexMap<String, Group>,
     pub host_vars: BTreeMap<String, Map<String, Value>>,
     pub hosts: Vec<String>, // in order of appearance
     pub base_dir: PathBuf,
@@ -632,5 +632,117 @@ pub fn try_load_vars_file(p: &Path, out: &mut Map<String, Value>) -> Result<()> 
 pub fn load_vars_file(p: &Path, out: &mut Map<String, Value>) {
     if let Err(e) = try_load_vars_file(p, out) {
         eprintln!("[WARNING]: {e:#}");
+    }
+}
+
+impl Inventory {
+    /// Groups that are not a child of another group, in definition order.
+    fn top_level_groups(&self) -> Vec<String> {
+        let children: std::collections::HashSet<&String> = self
+            .groups
+            .values()
+            .flat_map(|g| g.children.iter())
+            .collect();
+        self.groups
+            .keys()
+            .filter(|g| g.as_str() != "all" && g.as_str() != "ungrouped" && !children.contains(g))
+            .cloned()
+            .collect()
+    }
+
+    fn ordered_hosts(&self, g: &Group) -> Vec<String> {
+        self.hosts
+            .iter()
+            .filter(|h| g.hosts.contains(*h))
+            .cloned()
+            .collect()
+    }
+
+    /// `ansible-inventory --list` (legacy profile) as JSON.
+    pub fn to_list_json(&self) -> Value {
+        let mut out = Map::new();
+        let mut hostvars = Map::new();
+        for h in &self.hosts {
+            hostvars.insert(h.clone(), Value::Object(self.vars_for(h)));
+        }
+        let mut meta = Map::new();
+        meta.insert("hostvars".into(), Value::Object(hostvars));
+        meta.insert("profile".into(), "inventory_legacy".into());
+        out.insert("_meta".into(), Value::Object(meta));
+        let mut all_children: Vec<Value> = vec!["ungrouped".into()];
+        all_children.extend(self.top_level_groups().into_iter().map(Value::from));
+        out.insert(
+            "all".into(),
+            serde_json::json!({ "children": all_children }),
+        );
+        for (name, g) in &self.groups {
+            if name == "all" {
+                continue;
+            }
+            let mut m = Map::new();
+            let hosts = if name == "ungrouped" {
+                self.ordered_hosts(g)
+            } else {
+                self.ordered_hosts(g)
+            };
+            if !hosts.is_empty() {
+                m.insert(
+                    "hosts".into(),
+                    Value::Array(hosts.into_iter().map(Value::from).collect()),
+                );
+            }
+            if !g.children.is_empty() {
+                let kids: Vec<Value> = self
+                    .groups
+                    .keys()
+                    .filter(|k| g.children.contains(*k))
+                    .cloned()
+                    .map(Value::from)
+                    .collect();
+                m.insert("children".into(), Value::Array(kids));
+            }
+            if !m.is_empty() {
+                out.insert(name.clone(), Value::Object(m));
+            }
+        }
+        Value::Object(out)
+    }
+
+    /// `ansible-inventory --graph`.
+    pub fn to_graph(&self) -> String {
+        fn rec(inv: &Inventory, name: &str, prefix: &str, out: &mut String, top: bool) {
+            let g = inv.groups.get(name).cloned().unwrap_or_default();
+            out.push_str(&format!(
+                "{prefix}{}@{name}:\n",
+                if top { "" } else { "|--" }
+            ));
+            let child_prefix = if top {
+                "  ".to_string()
+            } else {
+                format!("{}|  ", prefix.replace("|--", ""))
+            };
+            let kids: Vec<String> = if name == "all" {
+                let mut k = vec!["ungrouped".to_string()];
+                k.extend(inv.top_level_groups());
+                k
+            } else {
+                inv.groups
+                    .keys()
+                    .filter(|k| g.children.contains(*k))
+                    .cloned()
+                    .collect()
+            };
+            for k in kids {
+                rec(inv, &k, &child_prefix, out, false);
+            }
+            if name != "all" {
+                for h in inv.ordered_hosts(&g) {
+                    out.push_str(&format!("{child_prefix}|--{h}\n"));
+                }
+            }
+        }
+        let mut out = String::new();
+        rec(self, "all", "", &mut out, true);
+        out
     }
 }

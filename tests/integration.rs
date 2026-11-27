@@ -540,3 +540,22 @@ fn compat_list_modes_match_ansible() {
         );
     }
 }
+
+#[test]
+fn compat_inventory_list_and_graph_match_ansible() {
+    for f in ["list", "graph"] {
+        let flag = format!("--{f}");
+        let o = Command::new(env!("CARGO_BIN_EXE_ransible"))
+            .args(["inventory", "-i", "tests/fixtures/inventory.ini", &flag])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        let want =
+            std::fs::read_to_string(format!("tests/fixtures/inventory.{f}.expected")).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout),
+            want,
+            "inventory {flag} differs from ansible-inventory"
+        );
+    }
+}
