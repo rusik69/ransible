@@ -196,7 +196,8 @@ pub fn async_start(module: &str, a: &Args, ctx: &Ctx, secs: u64) -> Result<Res> 
     let script = format!(
         "mkdir -p {dir} && F={dir}/{jid} && (nohup sh -c {inner} >/dev/null 2>&1 &) ; echo started",
         inner = q(&format!(
-            "timeout {secs} sh -c {c} >$HOME/.ansible_async/{jid}.out 2>$HOME/.ansible_async/{jid}.err; echo $? >$HOME/.ansible_async/{jid}.rc",
+            // portable timeout (no coreutils `timeout` on macOS/BSD): run, arm a watchdog, wait, record rc
+            "O=$HOME/.ansible_async/{jid}; sh -c {c} >$O.out 2>$O.err & p=$!; (sleep {secs}; kill $p 2>/dev/null) & w=$!; wait $p; rc=$?; kill $w 2>/dev/null; echo $rc >$O.rc",
             c = q(&cmd)
         ))
     );
