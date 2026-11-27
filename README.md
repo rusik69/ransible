@@ -32,7 +32,8 @@ Open the printed URL. On first start an `admin` user is created (generated passw
 - **Isolation:** each job runs the same binary as a subprocess with a minimal environment; credentials are written to a 0700 per-job directory (0600 files) that is deleted afterwards.
 - Lean CLI-only build: `cargo build --release --no-default-features`.
 - **Schedules** (cron, UTC), **notifications** (webhook / Slack on start, success, failure; URL stored encrypted), **activity stream** (audit trail of changes and launches).
-- Not yet: workflows, teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
+- **Workflows:** DAGs of job templates with success / failure / always edges and approval gates; graph editor and a live status view in the UI; failures handled by a failure edge do not fail the workflow.
+- Not yet: teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
 
 ## Platforms
 Release binaries (GitHub Releases, with SHA256SUMS and build provenance): Linux x86_64/aarch64 (glibc and static musl), macOS x86_64/aarch64, Windows x86_64/aarch64 (SSH controller; the `local` connection needs a POSIX `sh`). Targets must pass `make check-targets`.

@@ -679,3 +679,258 @@ fn schedules_notifications_and_activity() {
         403
     );
 }
+
+fn wait_wf(s: &Server, tok: &str, id: i64, until: impl Fn(&Value) -> bool) -> Value {
+    let t = Instant::now();
+    loop {
+        let wj = j(curl(
+            s,
+            "GET",
+            &format!("/api/v2/workflow_jobs/{id}/"),
+            Some(tok),
+            None,
+        ));
+        if until(&wj) {
+            return wj;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(90),
+            "workflow timed out: {wj}"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[test]
+fn workflow_with_failure_path_and_approval() {
+    if !curl_ok() {
+        return;
+    }
+    let s = start("wf");
+    let tok = j(login(&s, "admin", "admin-password-1"))["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let proj_dir = s.dir.join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::write(
+        proj_dir.join("ok.yml"),
+        "- hosts: all\n  gather_facts: no\n  tasks:\n    - debug: msg=ok\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj_dir.join("bad.yml"),
+        "- hosts: all\n  gather_facts: no\n  tasks:\n    - fail: msg=boom\n",
+    )
+    .unwrap();
+    let pid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/projects/",
+        Some(&tok),
+        Some(json!({"name": "p", "local_path": proj_dir.to_str().unwrap()})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let iid = j(curl(
+        &s,
+        "POST",
+        "/api/v2/inventories/",
+        Some(&tok),
+        Some(json!({"name": "i", "content": "localhost ansible_connection=local\n"})),
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let mk = |name: &str, pb: &str| {
+        j(curl(
+            &s,
+            "POST",
+            "/api/v2/job_templates/",
+            Some(&tok),
+            Some(json!({"name": name, "project_id": pid, "playbook": pb, "inventory_id": iid})),
+        ))["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (ok, bad) = (mk("ok", "ok.yml"), mk("bad", "bad.yml"));
+    let wf = j(curl(
+        &s,
+        "POST",
+        "/api/v2/workflow_templates/",
+        Some(&tok),
+        Some(json!({"name": "wf"})),
+    ));
+    let wid = wf["id"].as_i64().unwrap();
+    let graph = json!({
+        "nodes": [
+            {"key": "a", "label": "a", "template_id": ok},
+            {"key": "b", "label": "b", "template_id": bad},
+            {"key": "c", "label": "c", "template_id": ok},
+            {"key": "d", "label": "d", "template_id": ok},
+            {"key": "gate", "label": "gate", "kind": "approval"},
+            {"key": "e", "label": "e", "template_id": ok}
+        ],
+        "edges": [
+            {"from": "a", "to": "b", "kind": "success"},
+            {"from": "b", "to": "c", "kind": "failure"},
+            {"from": "b", "to": "d", "kind": "success"},
+            {"from": "c", "to": "gate", "kind": "success"},
+            {"from": "gate", "to": "e", "kind": "success"}
+        ]
+    });
+    // invalid graphs are rejected
+    let cyc = json!({"nodes": [{"key": "x", "template_id": ok}, {"key": "y", "template_id": ok}], "edges": [{"from": "x", "to": "y"}, {"from": "y", "to": "x"}]});
+    assert_eq!(
+        curl(
+            &s,
+            "PUT",
+            &format!("/api/v2/workflow_templates/{wid}/graph/"),
+            Some(&tok),
+            Some(cyc)
+        )
+        .0,
+        400
+    );
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/workflow_templates/{wid}/launch/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        400
+    ); // empty
+    assert_eq!(
+        curl(
+            &s,
+            "PUT",
+            &format!("/api/v2/workflow_templates/{wid}/graph/"),
+            Some(&tok),
+            Some(graph)
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        j(curl(
+            &s,
+            "GET",
+            &format!("/api/v2/workflow_templates/{wid}/graph/"),
+            Some(&tok),
+            None
+        ))["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+
+    let wj = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/workflow_templates/{wid}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    let st = wait_wf(&s, &tok, wj, |w| w["state"]["gate"]["status"] == "waiting");
+    assert_eq!(st["state"]["a"]["status"], "successful");
+    assert_eq!(st["state"]["b"]["status"], "failed");
+    assert_eq!(st["state"]["c"]["status"], "successful");
+    assert_eq!(st["state"]["d"]["status"], "skipped");
+    assert_eq!(st["status"], "running");
+    // approve the gate
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/workflow_jobs/{wj}/nodes/gate/approve/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        200
+    );
+    let done = wait_wf(&s, &tok, wj, |w| {
+        !["pending", "running"].contains(&w["status"].as_str().unwrap_or(""))
+    });
+    assert_eq!(done["state"]["e"]["status"], "successful", "{done}");
+    assert_eq!(done["status"], "successful"); // the failure was handled by the failure edge
+    // child jobs are linked to the workflow job
+    let a_job = done["state"]["a"]["job_id"].as_i64().unwrap();
+    assert_eq!(
+        j(curl(
+            &s,
+            "GET",
+            &format!("/api/v2/jobs/{a_job}/"),
+            Some(&tok),
+            None
+        ))["status"],
+        "successful"
+    );
+
+    // deny path: workflow fails
+    let graph2 = json!({"nodes": [{"key": "gate", "kind": "approval"}, {"key": "x", "template_id": ok}], "edges": [{"from": "gate", "to": "x", "kind": "success"}]});
+    curl(
+        &s,
+        "PUT",
+        &format!("/api/v2/workflow_templates/{wid}/graph/"),
+        Some(&tok),
+        Some(graph2),
+    );
+    let wj2 = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/workflow_templates/{wid}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    wait_wf(&s, &tok, wj2, |w| w["state"]["gate"]["status"] == "waiting");
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/workflow_jobs/{wj2}/nodes/gate/deny/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        200
+    );
+    let d2 = wait_wf(&s, &tok, wj2, |w| {
+        !["pending", "running"].contains(&w["status"].as_str().unwrap_or(""))
+    });
+    assert_eq!(d2["status"], "failed");
+    assert_eq!(d2["state"]["x"]["status"], "skipped");
+    // cancel a waiting workflow
+    let wj3 = j(curl(
+        &s,
+        "POST",
+        &format!("/api/v2/workflow_templates/{wid}/launch/"),
+        Some(&tok),
+        None,
+    ))["id"]
+        .as_i64()
+        .unwrap();
+    wait_wf(&s, &tok, wj3, |w| w["state"]["gate"]["status"] == "waiting");
+    assert_eq!(
+        curl(
+            &s,
+            "POST",
+            &format!("/api/v2/workflow_jobs/{wj3}/cancel/"),
+            Some(&tok),
+            None
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        wait_wf(&s, &tok, wj3, |w| w["status"] == "canceled")["state"]["x"]["status"],
+        "canceled"
+    );
+}

@@ -2,6 +2,7 @@
 mod cron;
 mod db;
 mod jobs;
+mod workflows;
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -30,6 +31,8 @@ pub struct AppState {
     pub data_dir: Arc<PathBuf>,
     pub live: Arc<Mutex<HashMap<i64, jobs::Live>>>,
     pub sem: Arc<tokio::sync::Semaphore>,
+    /// cancel handles of running workflow jobs
+    pub wf: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Notify>>>>,
     pub login_failures: Arc<Mutex<HashMap<String, Vec<std::time::Instant>>>>,
 }
 
@@ -242,6 +245,16 @@ fn resource(name: &str) -> Option<Res> {
             ],
             write: "write",
         },
+        "workflow_templates" => Res {
+            table: "workflow_templates",
+            cols: &["name", "description"],
+            write: "write",
+        },
+        "workflow_jobs" => Res {
+            table: "workflow_jobs",
+            cols: &["name", "status", "launched_by", "created"],
+            write: "write",
+        },
         "schedules" => Res {
             table: "schedules",
             cols: &[
@@ -328,6 +341,13 @@ fn sanitize(state: &AppState, res: &str, mut row: Map<String, Value>) -> Map<Str
             "webhook_url".into(),
             if set { "$encrypted$".into() } else { "".into() },
         );
+    }
+    if res == "workflow_jobs" {
+        for k in ["graph", "state"] {
+            if let Some(Value::String(p)) = row.get(k).cloned() {
+                row.insert(k.into(), serde_json::from_str(&p).unwrap_or(Value::Null));
+            }
+        }
     }
     if res == "jobs" {
         if let Some(Value::String(p)) = row.get("params").cloned() {
@@ -561,7 +581,7 @@ async fn create_res(
     Json(mut body): Json<Map<String, Value>>,
 ) -> R<(StatusCode, Json<Value>)> {
     let res = resource(&name).ok_or_else(not_found)?;
-    if name == "jobs" || name == "activity_stream" || !u.can(res.write) {
+    if matches!(name.as_str(), "jobs" | "activity_stream" | "workflow_jobs") || !u.can(res.write) {
         return Err(forbidden());
     }
     if name == "users" && !body.contains_key("password") {
@@ -612,7 +632,7 @@ async fn update_res(
     Json(mut body): Json<Map<String, Value>>,
 ) -> R {
     let res = resource(&name).ok_or_else(not_found)?;
-    if name == "jobs" || name == "activity_stream" || !u.can(res.write) {
+    if matches!(name.as_str(), "jobs" | "activity_stream" | "workflow_jobs") || !u.can(res.write) {
         return Err(forbidden());
     }
     let existing = {
@@ -662,6 +682,16 @@ async fn delete_res(
     }
     if name == "users" {
         c.execute("DELETE FROM tokens WHERE user_id = ?1", [id])?;
+    }
+    if name == "workflow_templates" {
+        c.execute("DELETE FROM workflow_nodes WHERE workflow_id = ?1", [id])?;
+        c.execute("DELETE FROM workflow_edges WHERE workflow_id = ?1", [id])?;
+    }
+    if name == "workflow_jobs" {
+        c.execute(
+            "DELETE FROM workflow_approvals WHERE workflow_job_id = ?1",
+            [id],
+        )?;
     }
     if !db::delete(&c, res.table, id)? {
         return Err(not_found());
@@ -1159,7 +1189,7 @@ async fn dashboard(State(st): State<AppState>, _u: AuthUser) -> R {
         &[],
     )?;
     Ok(Json(json!({
-        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users"), "schedules": count("schedules")},
+        "counts": {"projects": count("projects"), "inventories": count("inventories"), "credentials": count("credentials"), "job_templates": count("job_templates"), "jobs": count("jobs"), "users": count("users"), "schedules": count("schedules"), "workflows": count("workflow_templates")},
         "jobs_by_status": by_status,
         "recent_jobs": recent,
     })))
@@ -1191,6 +1221,197 @@ async fn password_change(
         rusqlite::params![db::hash_password(new), u.id],
     )?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- workflows ----------
+
+fn parse_graph(
+    body: &Map<String, Value>,
+) -> Result<(Vec<workflows::Node>, Vec<workflows::Edge>), ApiError> {
+    let strs = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let nodes: Vec<workflows::Node> = body
+        .get("nodes")
+        .and_then(|n| n.as_array())
+        .ok_or_else(|| bad("nodes must be a list"))?
+        .iter()
+        .map(|n| workflows::Node {
+            key: strs(n, "key"),
+            label: strs(n, "label"),
+            kind: if strs(n, "kind").is_empty() {
+                "job".into()
+            } else {
+                strs(n, "kind")
+            },
+            template_id: n.get("template_id").and_then(|t| t.as_i64()),
+            extra_vars: strs(n, "extra_vars"),
+        })
+        .collect();
+    let edges: Vec<workflows::Edge> = body
+        .get("edges")
+        .and_then(|n| n.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|e| workflows::Edge {
+                    from: strs(e, "from"),
+                    to: strs(e, "to"),
+                    kind: if strs(e, "kind").is_empty() {
+                        "success".into()
+                    } else {
+                        strs(e, "kind")
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    workflows::validate(&nodes, &edges).map_err(bad)?;
+    Ok((nodes, edges))
+}
+
+async fn workflow_graph_get(State(st): State<AppState>, _u: AuthUser, Path(id): Path<i64>) -> R {
+    {
+        let c = st.db.lock().unwrap();
+        db::get(&c, "workflow_templates", id)?.ok_or_else(not_found)?;
+    }
+    let (n, e) = workflows::load_graph(&st, id);
+    Ok(Json(workflows::graph_json(&n, &e)))
+}
+
+async fn workflow_graph_put(
+    State(st): State<AppState>,
+    u: AuthUser,
+    Path(id): Path<i64>,
+    Json(body): Json<Map<String, Value>>,
+) -> R {
+    if !u.can("write") {
+        return Err(forbidden());
+    }
+    let (nodes, edges) = parse_graph(&body)?;
+    {
+        let mut c = st.db.lock().unwrap();
+        db::get(&c, "workflow_templates", id)?.ok_or_else(not_found)?;
+        for n in &nodes {
+            if let Some(t) = n.template_id
+                && db::get(&c, "job_templates", t)?.is_none()
+            {
+                return Err(bad(format!(
+                    "node '{}': job template {t} does not exist",
+                    n.key
+                )));
+            }
+        }
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM workflow_nodes WHERE workflow_id = ?1", [id])?;
+        tx.execute("DELETE FROM workflow_edges WHERE workflow_id = ?1", [id])?;
+        for n in &nodes {
+            tx.execute("INSERT INTO workflow_nodes (workflow_id, key, label, kind, template_id, extra_vars) VALUES (?1,?2,?3,?4,?5,?6)", rusqlite::params![id, n.key, n.label, n.kind, n.template_id, n.extra_vars])?;
+        }
+        for e in &edges {
+            tx.execute("INSERT INTO workflow_edges (workflow_id, from_key, to_key, kind) VALUES (?1,?2,?3,?4)", rusqlite::params![id, e.from, e.to, e.kind])?;
+        }
+        tx.commit()?;
+    }
+    st.activity(
+        &u.username,
+        "update",
+        "workflow_template",
+        id,
+        "edited workflow graph",
+    );
+    Ok(Json(workflows::graph_json(&nodes, &edges)))
+}
+
+async fn workflow_launch(
+    State(st): State<AppState>,
+    u: AuthUser,
+    Path(id): Path<i64>,
+) -> R<(StatusCode, Json<Value>)> {
+    if !u.can("operate") {
+        return Err(forbidden());
+    }
+    let wf = {
+        let c = st.db.lock().unwrap();
+        db::get(&c, "workflow_templates", id)?.ok_or_else(not_found)?
+    };
+    let (nodes, edges) = workflows::load_graph(&st, id);
+    if nodes.is_empty() {
+        return Err(bad("workflow has no nodes"));
+    }
+    let name = wf["name"].as_str().unwrap_or("").to_string();
+    let wj = {
+        let c = st.db.lock().unwrap();
+        c.execute(
+            "INSERT INTO workflow_jobs (workflow_id, name, launched_by, graph) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, name, u.username, workflows::graph_json(&nodes, &edges).to_string()],
+        )?;
+        c.last_insert_rowid()
+    };
+    st.activity(
+        &u.username,
+        "launch",
+        "workflow_job",
+        wj,
+        &format!("launched workflow {name}"),
+    );
+    tokio::spawn(workflows::run_workflow(st.clone(), wj, nodes, edges, name));
+    let row = {
+        let c = st.db.lock().unwrap();
+        db::get(&c, "workflow_jobs", wj)?.ok_or_else(not_found)?
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(Value::Object(sanitize(&st, "workflow_jobs", row))),
+    ))
+}
+
+async fn workflow_cancel(State(st): State<AppState>, u: AuthUser, Path(id): Path<i64>) -> R {
+    if !u.can("operate") {
+        return Err(forbidden());
+    }
+    let n = st.wf.lock().unwrap().get(&id).cloned();
+    match n {
+        Some(n) => {
+            st.activity(
+                &u.username,
+                "cancel",
+                "workflow_job",
+                id,
+                "canceled workflow job",
+            );
+            n.notify_one();
+            Ok(Json(json!({"canceled": true})))
+        }
+        None => Err(bad("workflow job is not running")),
+    }
+}
+
+async fn workflow_decide(
+    State(st): State<AppState>,
+    u: AuthUser,
+    Path((id, key, decision)): Path<(i64, String, String)>,
+) -> R {
+    if !u.can("operate") {
+        return Err(forbidden());
+    }
+    if decision != "approve" && decision != "deny" {
+        return Err(not_found());
+    }
+    let c = st.db.lock().unwrap();
+    let wj = db::get(&c, "workflow_jobs", id)?.ok_or_else(not_found)?;
+    let state: Value =
+        serde_json::from_str(wj["state"].as_str().unwrap_or("{}")).unwrap_or(Value::Null);
+    if state[&key]["status"] != "waiting" {
+        return Err(bad("node is not waiting for approval"));
+    }
+    c.execute("INSERT INTO workflow_approvals (workflow_job_id, key, decision, by_user) VALUES (?1, ?2, ?3, ?4)", rusqlite::params![id, key, decision, u.username])?;
+    drop(c);
+    st.activity(
+        &u.username,
+        &decision,
+        "workflow_job",
+        id,
+        &format!("{decision}d node {key}"),
+    );
+    Ok(Json(json!({"recorded": decision})))
 }
 
 // ---------- static UI ----------
@@ -1248,6 +1469,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v2/jobs/{id}/stdout/", get(job_stdout))
         .route("/api/v2/jobs/{id}/job_events/", get(job_events))
         .route("/api/v2/jobs/{id}/stream/", get(job_stream))
+        .route(
+            "/api/v2/workflow_templates/{id}/graph/",
+            get(workflow_graph_get).put(workflow_graph_put),
+        )
+        .route(
+            "/api/v2/workflow_templates/{id}/launch/",
+            post(workflow_launch),
+        )
+        .route("/api/v2/workflow_jobs/{id}/cancel/", post(workflow_cancel))
+        .route(
+            "/api/v2/workflow_jobs/{id}/nodes/{key}/{decision}/",
+            post(workflow_decide),
+        )
         .route("/api/v2/{res}/", get(list_res).post(create_res))
         .route(
             "/api/v2/{res}/{id}/",
@@ -1292,6 +1526,7 @@ pub fn build_state(
         data_dir: Arc::new(data_dir.to_path_buf()),
         live: Default::default(),
         sem: Arc::new(tokio::sync::Semaphore::new(max_jobs.max(1))),
+        wf: Default::default(),
         login_failures: Default::default(),
     })
 }
@@ -1388,6 +1623,7 @@ pub async fn serve(opts: Options) -> Result<()> {
     {
         let c = st.db.lock().unwrap();
         c.execute("UPDATE jobs SET status = 'error', finished = datetime('now') WHERE status IN ('pending','running')", [])?;
+        c.execute("UPDATE workflow_jobs SET status = 'error', finished = datetime('now') WHERE status IN ('pending','running')", [])?;
     }
     tokio::spawn(scheduler(st.clone()));
     let app = router(st);

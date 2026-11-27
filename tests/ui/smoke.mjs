@@ -29,8 +29,11 @@ const inv = await api('/inventories/', 'POST', { name: 'i', content: 'localhost 
 await api('/credentials/', 'POST', { name: 'c', username: 'u', secrets: { password: 'x' } });
 const tpl = await api('/job_templates/', 'POST', { name: 't', project_id: proj.id, playbook: 'site.yml', inventory_id: inv.id });
 const job = await api(`/job_templates/${tpl.id}/launch/`, 'POST', {});
+const wf = await api('/workflow_templates/', 'POST', { name: 'w' });
+await api(`/workflow_templates/${wf.id}/graph/`, 'PUT', { nodes: [{ key: 'a', label: 'a', template_id: tpl.id }, { key: 'gate', kind: 'approval' }, { key: 'b', label: 'b', template_id: tpl.id }], edges: [{ from: 'a', to: 'gate', kind: 'success' }, { from: 'gate', to: 'b', kind: 'success' }] });
+const wj = await api(`/workflow_templates/${wf.id}/launch/`, 'POST', {});
 await sleep(2500);
-for (const v of ['dashboard', 'jobs', 'jobs/' + job.id, 'templates', 'schedules', 'projects', 'inventories', 'credentials', 'notifications', 'activity', 'users', 'account']) {
+for (const v of ['dashboard', 'workflows', 'wfjob/' + wj.id, 'jobs', 'jobs/' + job.id, 'templates', 'schedules', 'projects', 'inventories', 'credentials', 'notifications', 'activity', 'users', 'account']) {
   w.location.hash = '#/' + v; await sleep(500);
   const t = text();
   if (w.document.querySelector('.toast.err')) errors.push(v + ': error toast: ' + w.document.querySelector('.toast.err').textContent);

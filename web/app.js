@@ -80,7 +80,7 @@ const all = async (res) => (await api(`/${res}/?page_size=200`)).results;
 const nameOf = (list, id) => (list.find((x) => x.id === id) || {}).name || '—';
 
 // ---------- shell ----------
-const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['users', 'Users']];
+const NAV = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['templates', 'Templates'], ['workflows', 'Workflows'], ['schedules', 'Schedules'], ['projects', 'Projects'], ['inventories', 'Inventories'], ['credentials', 'Credentials'], ['notifications', 'Notifications'], ['activity', 'Activity'], ['users', 'Users']];
 function shell(route, content) {
   closeLive();
   $app.replaceChildren(h('div', { class: 'layout' },
@@ -180,6 +180,74 @@ const users = crud({ res: 'users', title: 'Users', single: 'user', empty: '',
   fields: (_c, row) => [{ name: 'username', label: 'Username' }, { name: 'role', label: 'Role', type: 'select', options: ['viewer', 'operator', 'admin'] }, { name: 'password', label: row ? 'New password (blank = keep)' : 'Password (min 8 chars)', type: 'password' }],
   beforeSave: (b) => { if (!b.password) delete b.password; },
   columns: () => [{ title: 'Username', render: (u) => u.username }, { title: 'Role', render: (u) => u.role }, { title: 'Created', render: (u) => when(u.created) }] });
+// ----- workflows -----
+const STATE_COLOR = { successful: 'var(--ok)', failed: 'var(--bad)', denied: 'var(--bad)', running: 'var(--info)', waiting: 'var(--warn)', pending: 'var(--muted)', skipped: 'var(--muted)', canceled: 'var(--muted)' };
+function dag(graph, state, onNode) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (t, a, ...k) => { const e = document.createElementNS(NS, t); for (const [x, y] of Object.entries(a || {})) e.setAttribute(x, y); k.forEach((c) => e.append(c)); return e; };
+  const layer = {}; const kids = {}; (graph.edges || []).forEach((e) => (kids[e.from] = (kids[e.from] || []).concat(e)));
+  const incoming = {}; (graph.edges || []).forEach((e) => (incoming[e.to] = (incoming[e.to] || 0) + 1));
+  const visit = (k, d) => { if ((layer[k] ?? -1) >= d) return; layer[k] = d; (kids[k] || []).forEach((e) => visit(e.to, d + 1)); };
+  (graph.nodes || []).filter((n) => !incoming[n.key]).forEach((n) => visit(n.key, 0));
+  const cols = {}; (graph.nodes || []).forEach((n) => { const l = layer[n.key] ?? 0; (cols[l] = cols[l] || []).push(n); });
+  const W = 150, H = 44, GX = 70, GY = 26, pos = {};
+  Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => (pos[n.key] = { x: 16 + l * (W + GX), y: 16 + i * (H + GY) })));
+  const width = 32 + (Math.max(0, ...Object.keys(cols).map(Number)) + 1) * (W + GX), height = 32 + Math.max(1, ...Object.values(cols).map((c) => c.length)) * (H + GY);
+  const col = { success: 'var(--ok)', failure: 'var(--bad)', always: 'var(--muted)' };
+  const svg = mk('svg', { width, height, viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Workflow graph' });
+  (graph.edges || []).forEach((e) => { const a = pos[e.from], b = pos[e.to]; if (!a || !b) return;
+    const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, mx = (x1 + x2) / 2;
+    svg.append(mk('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 6},${y2}`, fill: 'none', stroke: col[e.kind], 'stroke-width': 2, 'stroke-dasharray': e.kind === 'always' ? '5 4' : '' }));
+    svg.append(mk('path', { d: `M${x2},${y2} l-8,-4 l0,8 z`, fill: col[e.kind] })); });
+  (graph.nodes || []).forEach((n) => { const p = pos[n.key]; const st = state && state[n.key] ? state[n.key].status : null;
+    const g = mk('g', { style: onNode ? 'cursor:pointer' : '', tabindex: onNode ? 0 : -1 });
+    g.append(mk('rect', { x: p.x, y: p.y, width: W, height: H, rx: 9, fill: 'var(--panel)', stroke: st ? STATE_COLOR[st] : 'var(--border)', 'stroke-width': st ? 2.5 : 1.5 }));
+    const t = mk('text', { x: p.x + 10, y: p.y + 19, fill: 'var(--text)', 'font-size': 13, 'font-weight': 600 }); t.textContent = (n.label || n.key).slice(0, 20); g.append(t);
+    const t2 = mk('text', { x: p.x + 10, y: p.y + 35, fill: st ? STATE_COLOR[st] : 'var(--muted)', 'font-size': 11 }); t2.textContent = (n.kind === 'approval' ? 'approval' : 'job') + (st ? ' · ' + st : ''); g.append(t2);
+    if (onNode) g.addEventListener('click', () => onNode(n, st)); svg.append(g); });
+  return h('div', { class: 'card', style: 'overflow:auto;padding:8px' }, svg);
+}
+async function workflows() {
+  const [rows, tpls, wjobs] = await Promise.all([all('workflow_templates'), all('job_templates'), api('/workflow_jobs/?page_size=10&order_by=-id').then((r) => r.results)]);
+  const edit = async (row) => {
+    const f = form([{ name: 'name', label: 'Name' }, { name: 'description', label: 'Description' }], row);
+    const g = row ? await api(`/workflow_templates/${row.id}/graph/`) : { nodes: [], edges: [] };
+    const nodes = g.nodes.map((n) => ({ ...n })), edges = g.edges.map((e) => ({ ...e }));
+    const area = h('div', {});
+    const sel = (opts, val, on) => { const s = h('select', {}, opts.map((o) => h('option', { value: o.value }, o.label))); s.value = val ?? ''; s.addEventListener('change', () => on(s.value)); return s; };
+    const draw = () => {
+      area.replaceChildren(h('h2', {}, 'Nodes'),
+        ...nodes.map((n, i) => h('div', { class: 'row2', style: 'align-items:end;margin-bottom:6px' }, h('div', {}, h('label', {}, 'Key / label'), h('input', { value: n.key, oninput: (e) => { const old = n.key; n.key = e.target.value; edges.forEach((x) => { if (x.from === old) x.from = n.key; if (x.to === old) x.to = n.key; }); if (!n.label || n.label === old) n.label = n.key; } })),
+          h('div', { class: 'actions' }, sel([{ value: 'job', label: 'job' }, { value: 'approval', label: 'approval' }], n.kind, (v) => { n.kind = v; draw(); }),
+            n.kind === 'job' && sel([{ value: '', label: '— template —' }, ...tpls.map((t) => ({ value: t.id, label: t.name }))], n.template_id, (v) => (n.template_id = v ? Number(v) : null)),
+            h('button', { class: 'danger', onclick: () => { const k = n.key; nodes.splice(i, 1); for (let j = edges.length - 1; j >= 0; j--) if (edges[j].from === k || edges[j].to === k) edges.splice(j, 1); draw(); } }, '✕')))),
+        h('button', { onclick: () => { let k = 'n' + (nodes.length + 1); while (nodes.some((x) => x.key === k)) k += '_'; nodes.push({ key: k, label: k, kind: 'job', template_id: null }); draw(); } }, '+ Node'),
+        h('h2', {}, 'Edges (run "to" when "from" ...)'),
+        ...edges.map((e, i) => h('div', { class: 'actions', style: 'margin-bottom:6px' }, sel(nodes.map((n) => ({ value: n.key, label: n.key })), e.from, (v) => (e.from = v)), sel([{ value: 'success', label: 'succeeds →' }, { value: 'failure', label: 'fails →' }, { value: 'always', label: 'finishes →' }], e.kind, (v) => (e.kind = v)), sel(nodes.map((n) => ({ value: n.key, label: n.key })), e.to, (v) => (e.to = v)), h('button', { class: 'danger', onclick: () => { edges.splice(i, 1); draw(); } }, '✕'))),
+        h('button', { onclick: () => { if (nodes.length > 1) { edges.push({ from: nodes[0].key, to: nodes[1].key, kind: 'success' }); draw(); } } }, '+ Edge'),
+        h('h2', {}, 'Preview'), dag({ nodes, edges }, null));
+    };
+    draw(); const body = h('div', {}, f.el, area);
+    modal(row ? 'Edit workflow' : 'New workflow', body, (close) => [h('button', { onclick: close }, 'Cancel'), h('button', { class: 'primary', onclick: guard(async () => {
+      const w = row ? await api(`/workflow_templates/${row.id}/`, { method: 'PUT', body: f.get() }) : await api('/workflow_templates/', { method: 'POST', body: f.get() });
+      await api(`/workflow_templates/${w.id}/graph/`, { method: 'PUT', body: { nodes, edges } }); close(); toast('Saved'); route(); }) }, 'Save')]);
+  };
+  shell('workflows', [h('div', { class: 'bar' }, h('h1', {}, 'Workflow templates'), can('write') && h('button', { class: 'primary', onclick: () => edit(null) }, 'New workflow')),
+    table([{ title: 'Name', render: (w) => w.name }, { title: 'Description', render: (w) => w.description },
+      { title: '', render: (w) => h('div', { class: 'actions' }, can('operate') && h('button', { class: 'primary', onclick: guard(async () => { const r = await api(`/workflow_templates/${w.id}/launch/`, { method: 'POST' }); location.hash = '#/wfjob/' + r.id; }) }, 'Launch'), can('write') && h('button', { onclick: guard(() => edit(w)) }, 'Edit'),
+        can('write') && h('button', { class: 'danger', onclick: guard(async () => { if (!confirm(`Delete workflow "${w.name}"?`)) return; await api(`/workflow_templates/${w.id}/`, { method: 'DELETE' }); route(); }) }, 'Delete')) }], rows, 'Chain job templates with success/failure/always paths and approval gates.'),
+    h('h2', {}, 'Recent workflow runs'), table([{ title: 'ID', render: (j) => h('a', { href: '#/wfjob/' + j.id }, '#' + j.id) }, { title: 'Workflow', render: (j) => j.name }, { title: 'Status', render: (j) => badge(j.status) }, { title: 'By', render: (j) => j.launched_by }, { title: 'Created', render: (j) => when(j.created) }], wjobs, 'No workflow runs yet.')]);
+}
+async function wfJob(id) {
+  let wj = await api('/workflow_jobs/' + id + '/');
+  const holder = h('div', {});
+  const render = () => holder.replaceChildren(h('div', { class: 'bar' }, h('h1', {}, `Workflow #${wj.id} ${wj.name} `, badge(wj.status)), h('div', { class: 'actions' }, ['running', 'pending'].includes(wj.status) && can('operate') && h('button', { class: 'danger', onclick: guard(async () => { await api(`/workflow_jobs/${id}/cancel/`, { method: 'POST' }); toast('Cancel requested'); }) }, 'Cancel'))),
+    dag(wj.graph, wj.state, (n, st) => { if (st === 'waiting' && can('operate')) { modal('Approval: ' + (n.label || n.key), h('p', {}, 'This workflow is waiting for a decision.'), (close) => [h('button', { class: 'danger', onclick: guard(async () => { await api(`/workflow_jobs/${id}/nodes/${n.key}/deny/`, { method: 'POST' }); close(); }) }, 'Deny'), h('button', { class: 'primary', onclick: guard(async () => { await api(`/workflow_jobs/${id}/nodes/${n.key}/approve/`, { method: 'POST' }); close(); }) }, 'Approve')]); } else if (wj.state[n.key] && wj.state[n.key].job_id) location.hash = '#/jobs/' + wj.state[n.key].job_id; }),
+    h('p', { class: 'muted' }, 'Click a node to open its job output; click a waiting approval node to approve or deny.'),
+    h('dl', { class: 'kv card' }, h('dt', {}, 'Launched by'), h('dd', {}, wj.launched_by), h('dt', {}, 'Started'), h('dd', {}, when(wj.started)), h('dt', {}, 'Finished'), h('dd', {}, when(wj.finished))));
+  render(); shell('workflows', holder);
+  poll = setInterval(async () => { if (['running', 'pending'].includes(wj.status) || Object.values(wj.state || {}).some((s) => s.status === 'waiting')) { wj = await api('/workflow_jobs/' + id + '/'); render(); } }, 1500);
+}
 const schedules = async () => {
   const tpls = await all('job_templates');
   return crud({ res: 'schedules', title: 'Schedules', single: 'schedule', empty: 'Schedules launch a template on a cron expression (UTC), e.g. */15 * * * * or @daily.',
@@ -236,7 +304,7 @@ async function route() {
   try {
     if (!me) me = await api('/me/');
     const [r, arg] = (location.hash.replace(/^#\//, '') || 'dashboard').split('/');
-    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, schedules, projects, inventories, credentials, notifications, activity, users, account };
+    const views = { dashboard, jobs: arg ? () => jobDetail(arg) : jobs, templates, workflows, wfjob: () => wfJob(arg), schedules, projects, inventories, credentials, notifications, activity, users, account };
     await (views[r] || dashboard)();
   } catch (e) { if (token) toast(e.message, true); }
 }

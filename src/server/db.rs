@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS notification_templates (
 CREATE TABLE IF NOT EXISTS activity_stream (
   id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now')), username TEXT NOT NULL DEFAULT '',
   action TEXT NOT NULL, object_type TEXT NOT NULL DEFAULT '', object_id INTEGER, summary TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS workflow_templates (
+  id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '',
+  created TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS workflow_nodes (
+  id INTEGER PRIMARY KEY, workflow_id INTEGER NOT NULL, key TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'job', template_id INTEGER, extra_vars TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS workflow_edges (
+  id INTEGER PRIMARY KEY, workflow_id INTEGER NOT NULL, from_key TEXT NOT NULL, to_key TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'success');
+CREATE TABLE IF NOT EXISTS workflow_jobs (
+  id INTEGER PRIMARY KEY, workflow_id INTEGER, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+  launched_by TEXT NOT NULL DEFAULT '', created TEXT NOT NULL DEFAULT (datetime('now')), started TEXT, finished TEXT,
+  graph TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+  id INTEGER PRIMARY KEY, workflow_job_id INTEGER NOT NULL, key TEXT NOT NULL, decision TEXT NOT NULL, by_user TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
 "#;
 
@@ -60,6 +74,8 @@ pub fn open(path: &Path) -> Result<Connection> {
     c.pragma_update(None, "journal_mode", "WAL")?;
     c.pragma_update(None, "foreign_keys", "ON")?;
     c.execute_batch(SCHEMA)?;
+    // migrations for databases created by older versions
+    let _ = c.execute("ALTER TABLE jobs ADD COLUMN workflow_job_id INTEGER", []);
     Ok(c)
 }
 
