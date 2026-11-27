@@ -1,0 +1,11 @@
+changed: [w1] => (item=a)
+changed: [w1] => (item=b)
+changed: [w1] => (item=a)
+skipping: [w1] => (item=b) 
+failed: [w1] (item=a) => {"ansible_loop_var": "item", "chang
+failed: [w1] (item=b) => {"ansible_loop_var": "item", "chang
+...ignoring
+skipping: [w1] => (item=a) 
+skipping: [w1]
+changed: [w1 -> 127.0.0.1] => (item=a)
+changed: [w1 -> 127.0.0.1]

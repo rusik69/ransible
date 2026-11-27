@@ -116,15 +116,43 @@ impl Runner {
         );
         v.insert(
             "inventory_dir".into(),
-            self.inv
-                .read()
-                .unwrap()
-                .base_dir
+            {
+                let b = self.inv.read().unwrap().base_dir.clone();
+                std::fs::canonicalize(if b.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    &b
+                })
+                .unwrap_or(b)
                 .display()
                 .to_string()
-                .into(),
+            }
+            .into(),
         );
         v.insert("ansible_check_mode".into(), self.opts.check.into());
+        v.insert("ansible_diff_mode".into(), self.opts.diff.into());
+        v.insert(
+            "ansible_play_name".into(),
+            if env.play.name.is_empty() {
+                env.play.hosts.clone()
+            } else {
+                env.play.name.clone()
+            }
+            .into(),
+        );
+        v.insert(
+            "ansible_run_tags".into(),
+            if self.opts.tags.is_empty() {
+                vec!["all".to_string()]
+            } else {
+                self.opts.tags.clone()
+            }
+            .into(),
+        );
+        v.insert(
+            "ansible_skip_tags".into(),
+            self.opts.skip_tags.clone().into(),
+        );
         v.insert(
             "ansible_version".into(),
             json!({"full": "2.16.0", "major": 2, "minor": 16, "string": "2.16.0"}),

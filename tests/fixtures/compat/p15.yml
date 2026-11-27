@@ -1,0 +1,19 @@
+- hosts: w1
+  gather_facts: no
+  tasks:
+    - command: echo {{ item }}
+      loop: [a, b]
+    - command: echo {{ item }}
+      loop: [a, b]
+      when: item == 'a'
+    - command: "false"
+      loop: [a, b]
+      ignore_errors: yes
+    - debug: msg=x
+      loop: [a]
+      when: false
+    - command: echo {{ item }}
+      loop: [a]
+      delegate_to: 127.0.0.1
+    - command: echo hi
+      delegate_to: 127.0.0.1

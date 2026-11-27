@@ -129,8 +129,12 @@ impl ConsoleSink {
         item: Option<&str>,
         ignore: bool,
     ) -> String {
-        let label = item.map(|i| format!(" (item={i})")).unwrap_or_default();
-        let obj = res.as_object().cloned().unwrap_or_default();
+        let mut obj = res.as_object().cloned().unwrap_or_default();
+        let host = &match obj.remove("_ansible_delegated_to") {
+            Some(Value::String(d)) => format!("{host} -> {d}"),
+            _ => host.to_string(),
+        };
+        let item_lbl = item.map(|i| format!("(item={i})"));
         let compact = |r: &Map<String, Value>| pyjson(&Value::Object(r.clone()));
         match status {
             "ok" | "changed" => {
@@ -139,7 +143,13 @@ impl ConsoleSink {
                 } else {
                     ("33", "changed")
                 };
-                let head = self.paint(code, &format!("{word}: [{host}]{label}"));
+                let head = self.paint(
+                    code,
+                    &match &item_lbl {
+                        Some(l) => format!("{word}: [{host}] => {l}"),
+                        None => format!("{word}: [{host}]"),
+                    },
+                );
                 if module == "debug" {
                     let mut r = obj.clone();
                     for k in ["changed", "failed", "item", "ansible_loop_var"] {
@@ -152,18 +162,28 @@ impl ConsoleSink {
                     head
                 }
             }
-            "skipped" => self.paint("36", &format!("skipping: [{host}]{label}")),
+            "skipped" => self.paint(
+                "36",
+                &match &item_lbl {
+                    Some(l) => format!("skipping: [{host}] => {l} "),
+                    None => format!("skipping: [{host}]"),
+                },
+            ),
             "unreachable" => self.paint(
                 "31",
                 &format!("fatal: [{host}]: UNREACHABLE! => {}", compact(&obj)),
             ),
             _ => {
                 let mut r = obj;
-                r.remove("ansible_loop_var");
                 r.remove("failed");
+                if let Some(l) = &item_lbl {
+                    // loop item failure: `failed: [h] (item=x) => {...}`; "...ignoring" follows the last item
+                    return self.paint("31", &format!("failed: [{host}] {l} => {}", compact(&r)));
+                }
+                r.remove("ansible_loop_var");
                 let s = self.paint(
                     "31",
-                    &format!("fatal: [{host}]: FAILED!{label} => {}", compact(&r)),
+                    &format!("fatal: [{host}]: FAILED! => {}", compact(&r)),
                 );
                 if ignore {
                     format!("{s}\n{}", self.paint("36", "...ignoring"))

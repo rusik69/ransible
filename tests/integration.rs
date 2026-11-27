@@ -451,6 +451,32 @@ fn compat_text_edit_modules_match_ansible() {
 }
 
 #[test]
+fn compat_loop_item_and_delegate_output_matches_ansible() {
+    let (stdout, code) = run(
+        &[
+            "playbook",
+            "tests/fixtures/compat/p15.yml",
+            "-i",
+            "tests/fixtures/compat/inv.ini",
+        ],
+        "/tmp/ransible-it-compat-p15",
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let pick = |t: &str| -> Vec<String> {
+        t.lines()
+            .filter(|l| {
+                ["ok:", "changed:", "failed:", "skipping:", "fatal:", "..."]
+                    .iter()
+                    .any(|p| l.starts_with(p))
+            })
+            .map(|l| l.chars().take(60).collect())
+            .collect()
+    };
+    let want = std::fs::read_to_string("tests/fixtures/compat/p15.expected").unwrap();
+    assert_eq!(pick(&stdout), pick(&want));
+}
+
+#[test]
 fn compat_roles_dependencies_includes_and_tags_match_ansible() {
     let cases: [(&str, &[&str]); 4] = [
         ("all", &[]),

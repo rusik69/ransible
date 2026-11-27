@@ -515,8 +515,19 @@ impl Runner {
                         vv.insert(loop_var.clone(), v.clone());
                         self.templar.render_string(l, &vv).ok()
                     });
-                l.unwrap_or_else(|| vstr(v))
+                l.unwrap_or_else(|| match v {
+                    Value::Array(_) | Value::Object(_) | Value::Bool(_) => crate::pyfmt::py_repr(v),
+                    o => vstr(o),
+                })
             });
+            let mut ev_res = out.res.clone();
+            if let Some(d) =
+                t.kw.get("delegate_to")
+                    .and_then(|d| self.templar.render_string(&vstr(d), &base_vars).ok())
+                && d != hn
+            {
+                ev_res.insert("_ansible_delegated_to".into(), d.into());
+            }
             run.events.push(Event::HostResult {
                 host: hn.clone(),
                 status: out.kind.as_str().into(),
@@ -527,7 +538,7 @@ impl Runner {
                     .get("ignore_errors")
                     .and_then(loose_bool)
                     .unwrap_or(false),
-                result: Value::Object(out.res.clone()),
+                result: Value::Object(ev_res),
             });
             any_changed |= out.kind == Kind::Changed;
             any_chg_raw |= out
@@ -538,17 +549,34 @@ impl Runner {
             any_failed |= out.kind == Kind::Failed;
             any_unreach |= out.kind == Kind::Unreachable;
             all_skipped &= out.kind == Kind::Skipped;
-            let stop = matches!(out.kind, Kind::Failed | Kind::Unreachable);
+            // Ansible keeps going through the remaining items after a failure, except when
+            // the host is unreachable
+            let stop = out.kind == Kind::Unreachable;
             results.push(Value::Object(out.res));
-            if stop
-                && !t
-                    .kw
-                    .get("ignore_errors")
-                    .and_then(loose_bool)
-                    .unwrap_or(false)
-            {
+            if stop {
                 break;
             }
+        }
+        if items.is_some()
+            && any_failed
+            && t.kw
+                .get("ignore_errors")
+                .and_then(loose_bool)
+                .unwrap_or(false)
+        {
+            run.events.push(Event::Message {
+                text: "...ignoring".into(),
+            });
+        }
+        if items.is_some() && all_skipped && !results.is_empty() {
+            run.events.push(Event::HostResult {
+                host: hn.clone(),
+                status: "skipped".into(),
+                module: t.module.clone(),
+                item: None,
+                ignored: false,
+                result: json!({"skipped": true, "skip_reason": "All items skipped"}),
+            });
         }
         let agg: Map<String, Value> = if items.is_some() {
             let mut m = Map::new();

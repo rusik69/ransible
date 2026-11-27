@@ -474,6 +474,36 @@ pub fn yaml_dump_opts(v: &Value, indent: usize, sort: bool, leaf_flow: bool) -> 
     out
 }
 
+/// Python `repr()` of a JSON value (`{'k': 1}`, `['a']`, `True`, `None`), as Ansible prints loop items.
+pub fn py_repr(v: &Value) -> String {
+    match v {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => {
+            if s.contains('\'') && !s.contains('"') {
+                format!("\"{s}\"")
+            } else {
+                format!(
+                    "'{}'",
+                    s.replace('\\', "\\\\")
+                        .replace('\'', "\\'")
+                        .replace('\n', "\\n")
+                )
+            }
+        }
+        Value::Array(a) => format!("[{}]", a.iter().map(py_repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, x)| format!("{}: {}", py_repr(&Value::String(k.clone())), py_repr(x)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
