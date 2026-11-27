@@ -2,12 +2,12 @@
 //!
 //! The executor emits [`Event`]s; sinks render them. `ConsoleSink` reproduces Ansible's default
 //! callback output, `JsonSink` writes one JSON object per line (for the web UI / API / `-o json`).
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct HostStat {
     pub host: String,
     pub ok: u32,
@@ -19,7 +19,7 @@ pub struct HostStat {
     pub ignored: u32,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     PlaybookStart {
@@ -106,7 +106,7 @@ impl ConsoleSink {
         }
     }
 
-    fn banner(&self, kind: &str, name: &str, role: Option<&str>) {
+    fn banner(&self, kind: &str, name: &str, role: Option<&str>) -> String {
         let name = match role {
             Some(r) if kind == "TASK" => format!("{r} : {name}"),
             _ => name.to_string(),
@@ -117,7 +117,7 @@ impl ConsoleSink {
             format!("{kind} [{name}] ")
         };
         let pad = 79usize.saturating_sub(head.chars().count());
-        println!("\n{}{}", head, "*".repeat(pad.max(3)));
+        format!("\n{}{}\n", head, "*".repeat(pad.max(3)))
     }
 
     fn fmt_result(
@@ -175,10 +175,11 @@ impl ConsoleSink {
     }
 }
 
-impl Sink for ConsoleSink {
-    fn emit(&self, e: &Event) {
+impl ConsoleSink {
+    /// Render an event to text (what the console prints; also used by the server for job output).
+    pub fn render(&self, e: &Event) -> String {
         match e {
-            Event::PlaybookStart { .. } | Event::PlaybookEnd { .. } => {}
+            Event::PlaybookStart { .. } | Event::PlaybookEnd { .. } => String::new(),
             Event::Banner { kind, name, role } => self.banner(kind, name, role.as_deref()),
             Event::HostResult {
                 host,
@@ -188,14 +189,14 @@ impl Sink for ConsoleSink {
                 ignored,
                 result,
             } => {
-                println!(
-                    "{}",
+                format!(
+                    "{}\n",
                     self.fmt_result(host, status, result, module, item.as_deref(), *ignored)
-                );
+                )
             }
-            Event::Message { text } => println!("{text}"),
+            Event::Message { text } => format!("{text}\n"),
             Event::Recap { stats } => {
-                self.banner("PLAY RECAP", "", None);
+                let mut out = self.banner("PLAY RECAP", "", None);
                 let w = stats.iter().map(|s| s.host.len()).max().unwrap_or(0);
                 for s in stats {
                     let c = |code: &str, k: &str, v: u32| {
@@ -205,8 +206,8 @@ impl Sink for ConsoleSink {
                             format!("{k}={v:<4}")
                         }
                     };
-                    println!(
-                        "{:<w$} : {} {} {} {} {} {} {}",
+                    out += &format!(
+                        "{:<w$} : {} {} {} {} {} {} {}\n",
                         s.host,
                         self.paint("32", &format!("ok={:<4}", s.ok)),
                         c("33", "changed", s.changed),
@@ -217,9 +218,16 @@ impl Sink for ConsoleSink {
                         format_args!("ignored={:<4}", s.ignored),
                     );
                 }
-                println!();
+                out.push('\n');
+                out
             }
         }
+    }
+}
+
+impl Sink for ConsoleSink {
+    fn emit(&self, e: &Event) {
+        print!("{}", self.render(e));
     }
 }
 

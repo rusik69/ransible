@@ -23,3 +23,5 @@ vault-pass*
 
 # release output
 /dist/
+node_modules/
+tests/ui/node_modules/

@@ -10,6 +10,7 @@ automation runner in Rust. Goal: run existing Ansible inventories/playbooks/role
 - `src/template.rs` Jinja2 via minijinja + Ansible filters/tests/lookups.
 - `src/executor.rs` run engine: vars, tasks, loops, blocks, handlers, includes, roles, strategy.
 - `src/modules.rs` built-in modules (one fn per module, dispatched in `run`).
+- `src/events.rs` structured run events + console/JSON sinks. `src/server/` (feature `server`): axum REST API, SQLite, job runner; `web/` embedded SPA.
 - `src/conn.rs` local/ssh connection (shells out to `ssh`; `become` via sudo).
 - `tests/integration.rs` fast offline tests; `tests/e2e/` differential tests vs real Ansible.
 
@@ -17,6 +18,7 @@ automation runner in Rust. Goal: run existing Ansible inventories/playbooks/role
 - `make check` fmt + clippy (`-D warnings`) + tests. Run before every commit.
 - `make e2e` / `make e2e-case CASE=nginx` run ransible and `ansible-playbook` on fresh
   podman containers and compare recap, remote state and idempotence. Needs `podman` and `ansible-playbook`.
+- `make ui-smoke` jsdom smoke test of the embedded UI (needs node; `npm install` in `tests/ui`).
 - `make security` cargo-audit + cargo-deny.
 
 ## Conventions

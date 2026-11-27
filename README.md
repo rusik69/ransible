@@ -21,6 +21,18 @@ ransible inventory 'web:&prod' -i inventory
 ## Not yet supported
 Galaxy collections / non-builtin modules (clear "unsupported module" error), Vault, dynamic inventory scripts/plugins, `free` strategy, become passwords, `async`/`poll`, `copy` of directories, `with_fileglob/subelements/nested`, callbacks, `ansible_facts` beyond the basic set from `setup`.
 
+## Web UI and API (AWX-style), same binary
+```
+ransible serve --listen 127.0.0.1:8080 --data-dir ~/.ransible [--admin-password-file F] [--max-concurrent-jobs 4]
+```
+Open the printed URL. On first start an `admin` user is created (generated password is printed once, or use `--admin-password-file` / `RANSIBLE_ADMIN_PASSWORD`). The UI is embedded in the executable; data lives in SQLite under `--data-dir`.
+
+- **Objects:** projects (git sync or local path), inventories (INI/YAML or dynamic script), credentials (SSH key/password/become/vault; encrypted at rest with a per-install master key, write-only in the API), job templates (extra vars, limit, tags, check/diff, become), jobs (live output over SSE, per-host summary, cancel, relaunch), users with roles `admin` / `operator` (launch, sync, cancel) / `viewer` (read-only), dashboard.
+- **API:** `/api/v2/` with AWX-style resources and pagination (`count/next/previous/results`, `?page`, `?page_size`, `?search`, `?order_by`); Bearer tokens (`POST /api/v2/auth/login/`) or HTTP Basic. Launch: `POST /api/v2/job_templates/{id}/launch/`. Live output: `GET /api/v2/jobs/{id}/stream/` (SSE).
+- **Isolation:** each job runs the same binary as a subprocess with a minimal environment; credentials are written to a 0700 per-job directory (0600 files) that is deleted afterwards.
+- Lean CLI-only build: `cargo build --release --no-default-features`.
+- Not yet: schedules, notifications, workflows, teams/object-level RBAC, OIDC/LDAP, remote workers (see plan).
+
 ## Platforms
 Release binaries (GitHub Releases, with SHA256SUMS and build provenance): Linux x86_64/aarch64 (glibc and static musl), macOS x86_64/aarch64, Windows x86_64/aarch64 (SSH controller; the `local` connection needs a POSIX `sh`). Targets must pass `make check-targets`.
 

@@ -8,6 +8,8 @@ mod modules;
 mod modules_extra;
 mod mysql;
 mod playbook;
+#[cfg(feature = "server")]
+mod server;
 mod template;
 mod vault;
 
@@ -165,6 +167,22 @@ enum Cmd {
         roles_path: Option<PathBuf>,
         #[arg(short = 'f', long = "force")]
         force: bool,
+    },
+    /// Run the web UI and REST API (AWX-style) in this process
+    #[cfg(feature = "server")]
+    Serve {
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+        /// Directory for the database, projects and the master key (default: ~/.ransible)
+        #[arg(long, env = "RANSIBLE_DATA_DIR")]
+        data_dir: Option<PathBuf>,
+        /// File with the initial admin password (first start only; otherwise one is generated)
+        #[arg(long)]
+        admin_password_file: Option<PathBuf>,
+        /// Maximum number of jobs running at once
+        #[arg(long, default_value_t = 4)]
+        max_concurrent_jobs: usize,
     },
     /// Print shell completions (bash, zsh, fish, elvish, powershell)
     Completions { shell: clap_complete::Shell },
@@ -445,7 +463,7 @@ fn run() -> Result<i32> {
             ask_vault_pass,
             ..
         } => init_vault(vault_password_file, *ask_vault_pass)?,
-        Cmd::Completions { .. } | Cmd::Galaxy { .. } => {}
+        _ => {}
     }
     match cli.cmd {
         Cmd::Galaxy {
@@ -470,6 +488,34 @@ fn run() -> Result<i32> {
                     .remove(0);
                 galaxy::install_role(&req, &dest, force)?;
             }
+            Ok(0)
+        }
+        #[cfg(feature = "server")]
+        Cmd::Serve {
+            listen,
+            data_dir,
+            admin_password_file,
+            max_concurrent_jobs,
+        } => {
+            let data_dir = data_dir.unwrap_or_else(|| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                    .join(".ransible")
+            });
+            let admin_password = match admin_password_file {
+                Some(f) => Some(std::fs::read_to_string(f)?.trim().to_string()),
+                None => std::env::var("RANSIBLE_ADMIN_PASSWORD")
+                    .ok()
+                    .filter(|p| !p.is_empty()),
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(server::serve(server::Options {
+                listen,
+                data_dir,
+                admin_password,
+                max_jobs: max_concurrent_jobs,
+            }))?;
             Ok(0)
         }
         Cmd::Completions { shell } => {

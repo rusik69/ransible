@@ -32,6 +32,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - run: cargo test --locked --all-targets
+  ui-smoke:
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd tests/ui && npm install --no-audit --no-fund
+      - run: make ui-smoke
   cross-check:
     # Make sure every release target at least compiles.
     name: check ${{ matrix.target }}
