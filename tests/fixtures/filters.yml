@@ -1,0 +1,38 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    data: {a: [{n: x, v: 1}, {n: y, v: 2}], b: {c: 5}}
+    l1: [1, 2, 3]
+    l2: [3, 4]
+  tasks:
+    - debug:
+        msg:
+          - "{{ data | json_query('a[?v>`1`].n') }}"
+          - "{{ 'abc' | hash('sha256') }}"
+          - "{{ 'abc' | hash('md5') }}"
+          - "{{ 'abc' | checksum }}"
+          - "{{ ['/a', 'b', 'c.txt'] | path_join }}"
+          - "{{ '/x/y/file.tar.gz' | splitext }}"
+          - "{{ 12 | type_debug }}{{ 'a' | type_debug }}{{ l1 | type_debug }}{{ data | type_debug }}"
+          - "{{ 1536 | human_readable }}"
+          - "{{ '2K' | human_to_bytes }}"
+          - "{{ l1 | zip(l2) | list }}"
+          - "{{ l1 | zip_longest(l2) | list }}"
+          - "{{ l1 | symmetric_difference(l2) }}"
+          - "{{ l1 | union(l2) }}"
+          - "{{ l1 | intersect(l2) }}"
+          - "{{ l1 | difference(l2) }}"
+          - "{{ 'https://u@h.example:8080/p/q?x=1' | urlsplit('hostname') }}"
+          - "{{ 'https://h.example:8080/p' | urlsplit('port') }}"
+          - "{{ 'a b&c' | urlencode }}"
+          - "{{ 'x' | ansible.builtin.default('d') }}{{ undefined_v | ansible.builtin.default('dd') }}"
+          - "{{ 'k' | extract({'k': 'val'}) }}"
+          - "{{ data.a | map(attribute='n') | list }}"
+          - "{{ data | dict2items | map(attribute='key') | list }}"
+          - "{{ {'a': 1} | combine({'b': 2}) }}"
+          - "{{ 'Hello' | regex_replace('l+', 'L') }}"
+          - "{{ ['a','b'] | join('-') }}"
+          - "{{ 'a,b' | split(',') }}"
+          - "{{ true | ternary('y','n') }}"
+          - "{{ '%Y-%m-%d' | strftime(86400) }}"

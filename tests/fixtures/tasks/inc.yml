@@ -1,0 +1,7 @@
+- name: included {{ item }}
+  debug:
+    msg: "inc {{ item }} on {{ inventory_hostname }}"
+- name: included file
+  copy:
+    content: "{{ item }}\n"
+    dest: "{{ out_dir }}/inc_{{ item }}.txt"

@@ -1,0 +1,10 @@
+server {
+  listen {{ http_port }};
+  name {{ site_name | upper }};
+{% for h in groups['web'] %}
+  upstream {{ h }};
+{% endfor %}
+{% if env is defined %}
+  env {{ env }};
+{% endif %}
+}

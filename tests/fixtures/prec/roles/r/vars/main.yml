@@ -1,0 +1,2 @@
+role_var: from_role_vars
+play_var: role_vars_wins

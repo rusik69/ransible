@@ -1,0 +1,10 @@
+- name: render config
+  template:
+    src: site.conf.j2
+    dest: "{{ out_dir }}/{{ inventory_hostname }}/site.conf"
+  notify: reload web
+- name: ensure line
+  lineinfile:
+    path: "{{ out_dir }}/{{ inventory_hostname }}/site.conf"
+    line: "# managed"
+    regexp: '^# managed'

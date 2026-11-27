@@ -1,0 +1,5 @@
+- hosts: all
+  become: true
+  vars:
+    pip_install_packages: [{name: requests}, {name: virtualenv}]
+  roles: [geerlingguy.git, geerlingguy.pip]

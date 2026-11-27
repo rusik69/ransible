@@ -1,0 +1,5 @@
+"msg": "role_dflt=from_group_vars_all role_only_dflt=d play_var=role_vars_wins role_var=from_role_vars"
+"msg": "both=all_file from_all=play_wins inline_group=group_file inline_host=host_file host_over=from_host_file"
+"msg": "task_over=task"
+"msg": "after_set_fact=fact"
+"msg": "extra=extra"

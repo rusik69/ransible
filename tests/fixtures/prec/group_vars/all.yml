@@ -1,0 +1,3 @@
+both: all_file
+from_all: all_file
+role_dflt: from_group_vars_all

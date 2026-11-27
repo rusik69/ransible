@@ -1,0 +1,5 @@
+- name: base dir
+  file:
+    path: "{{ out_dir }}/{{ inventory_hostname }}"
+    state: directory
+    mode: "0755"

@@ -1,0 +1,4 @@
+- hosts: all
+  become: true
+  vars: {nodejs_version: "20.x"}
+  roles: [geerlingguy.nodejs]

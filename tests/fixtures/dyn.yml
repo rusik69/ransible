@@ -1,0 +1,13 @@
+- hosts: web1
+  gather_facts: no
+  tasks:
+    - add_host: name=newhost groups=dyn,extra ansible_connection=local myvar=42
+    - group_by: key=role_{{ inventory_hostname }}
+- hosts: dyn
+  gather_facts: no
+  tasks:
+    - debug: msg="{{ inventory_hostname }} {{ myvar }} {{ group_names | sort }}"
+- hosts: role_web1
+  gather_facts: no
+  tasks:
+    - debug: msg="grouped {{ inventory_hostname }}"

@@ -1,0 +1,43 @@
+- name: config
+  template:
+    src: app.conf.j2
+    dest: "{{ app_dir }}/app.conf"
+    owner: "{{ app_user }}"
+    mode: "0640"
+  become: true
+  notify: restart app
+- name: motd
+  copy:
+    src: motd.txt
+    dest: /etc/motd
+  become: true
+- name: sysctl-ish line
+  lineinfile:
+    path: /etc/environment
+    regexp: '^APP_ENV='
+    line: "APP_ENV={{ app_env }}"
+  become: true
+- name: block block
+  block:
+    - name: clone repo
+      git:
+        repo: https://github.com/octocat/Hello-World.git
+        dest: "{{ app_dir }}/hello"
+        version: master
+      become: true
+      become_user: "{{ app_user }}"
+    - name: check
+      stat: path={{ app_dir }}/hello/README
+      become: true
+      register: readme
+    - assert:
+        that: readme.stat.exists
+  rescue:
+    - debug: msg="git failed (network?)"
+- name: whoami as app user
+  command: whoami
+  become: true
+  become_user: "{{ app_user }}"
+  register: who
+  changed_when: false
+- debug: var=who.stdout

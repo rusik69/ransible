@@ -1,0 +1,12 @@
+- name: deploy
+  hosts: all
+  roles:
+    - role: app
+      vars: {app_env: prod}
+  post_tasks:
+    - name: verify idempotent state
+      command: cat {{ app_dir }}/app.conf
+      register: conf
+      become: true
+      changed_when: false
+    - debug: msg="{{ conf.stdout_lines }}"

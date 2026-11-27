@@ -1,0 +1,4 @@
+- hosts: all
+  become: true
+  vars: {pip_install_packages: [{name: wheel, state: latest}, {name: six, version: 1.16.0}]}
+  roles: [geerlingguy.pip]

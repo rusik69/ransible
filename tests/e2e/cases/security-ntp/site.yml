@@ -1,0 +1,9 @@
+- hosts: all
+  become: true
+  vars:
+    security_ssh_password_authentication: "no"
+    security_ssh_permit_root_login: "no"
+    security_autoupdate_enabled: false
+    security_fail2ban_enabled: false
+    ntp_timezone: UTC
+  roles: [geerlingguy.security, geerlingguy.ntp]

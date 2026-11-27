@@ -1,0 +1,20 @@
+- hosts: web1
+  gather_facts: no
+  tasks:
+    - name: start async
+      shell: sleep 1 && echo done-async
+      async: 20
+      poll: 0
+      register: job
+    - name: wait
+      async_status: jid={{ job.ansible_job_id }}
+      register: js
+      until: js.finished
+      retries: 15
+      delay: 1
+    - debug: msg="{{ js.stdout }} rc={{ js.rc }}"
+    - block:
+        - name: boom
+          command: "false"
+      rescue:
+        - debug: msg="failed task={{ ansible_failed_task.name }} rc={{ ansible_failed_result.rc }}"

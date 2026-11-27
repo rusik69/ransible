@@ -1,0 +1,3 @@
+"msg": "done-async rc=0"
+fatal: [web1]: FAILED! => {"changed": true, "cmd": ["false"], "delta": "0:00:00.011346", "end": "2026-11-27 20:33:49.544281", "msg": "The command exited with a non-zero return code.", "rc": 1, "start": "2026-11-27 20:33:49.532935", "stderr": "", "stderr_lines": [], "stdout": "", "stdout_lines": []}
+"msg": "failed task=boom rc=1"

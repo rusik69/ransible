@@ -1,0 +1,64 @@
+- hosts: all
+  gather_facts: no
+  serial: 2
+  vars:
+    users:
+      alice: { uid: 1001 }
+      bob: { uid: 1002 }
+    flag: true
+  handlers:
+    - name: h1
+      debug: msg=h1
+      listen: "restart things"
+    - name: h2
+      debug: msg=h2
+      listen: "restart things"
+  tasks:
+    - include_tasks: tasks/inc.yml
+      loop: [x, y]
+      run_once: true
+    - name: dict loop
+      debug:
+        msg: "{{ item.key }}={{ item.value.uid }}"
+      loop: "{{ users | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+    - name: with_items
+      debug: msg="{{ item }}"
+      with_items:
+        - 1
+        - 2
+    - name: when var
+      debug: msg="flag on"
+      when: flag
+    - name: copy idempotent
+      copy:
+        content: "hello\n"
+        dest: "{{ out_dir }}/hello.txt"
+        mode: "0640"
+      notify: restart things
+    - name: until
+      command: echo ok
+      register: r
+      until: r.rc == 0
+      retries: 2
+      delay: 0
+    - name: failed_when
+      command: echo bad
+      register: bad
+      failed_when: "'bad' in bad.stdout"
+      ignore_errors: true
+    - name: undefined var
+      debug: msg="{{ nope }}"
+      ignore_errors: true
+    - name: extra
+      debug: msg="{{ extra_thing }} {{ hostvars['web1'].http_port }} {{ groups['all'] | length }}"
+    - name: run once
+      command: echo once
+      run_once: true
+      register: once
+    - debug: msg="{{ once.stdout }}"
+    - name: block when
+      block:
+        - debug: msg="in block"
+      when: inventory_hostname == 'db1'

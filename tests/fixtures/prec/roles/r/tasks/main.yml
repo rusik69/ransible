@@ -1,0 +1,1 @@
+- debug: msg="role_dflt={{ role_dflt }} role_only_dflt={{ role_only_dflt }} play_var={{ play_var }} role_var={{ role_var }}"

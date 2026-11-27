@@ -1,0 +1,16 @@
+- hosts: g
+  gather_facts: no
+  vars:
+    play_var: play
+    from_all: play_wins
+    extra_v: play
+    task_over: play
+  roles: [r]
+  tasks:
+    - debug: msg="both={{ both }} from_all={{ from_all }} inline_group={{ inline_group }} inline_host={{ inline_host }} host_over={{ host_over }}"
+    - debug: msg="task_over={{ task_over }}"
+      vars: {task_over: task}
+    - set_fact: {task_over: fact}
+    - debug: msg="after_set_fact={{ task_over }}"
+      vars: {task_over: task}
+    - debug: msg="extra={{ extra_v }}"

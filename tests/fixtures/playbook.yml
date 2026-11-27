@@ -1,0 +1,58 @@
+---
+- name: Web play
+  hosts: web
+  gather_facts: yes
+  vars:
+    items_list: [a, b, c]
+    computed: "{{ items_list | length * 2 }}"
+  roles:
+    - role: web
+      vars:
+        site_name: shop
+  tasks:
+    - name: show greeting
+      debug:
+        msg: "{{ greeting }} {{ computed }} {{ ansible_os_family is defined }}"
+    - name: loop
+      command: echo {{ item }}
+      loop: "{{ items_list }}"
+      register: loop_out
+      changed_when: false
+    - name: loop results
+      debug:
+        var: loop_out.results | map(attribute='stdout') | list
+    - name: block test
+      block:
+        - name: fail
+          fail:
+            msg: boom
+      rescue:
+        - debug:
+            msg: rescued
+      always:
+        - debug:
+            msg: always
+    - name: conditional
+      debug:
+        msg: only web1
+      when: inventory_hostname == 'web1'
+    - name: set fact
+      set_fact:
+        port_plus: "{{ http_port | int + 1 }}"
+    - assert:
+        that:
+          - port_plus is defined
+          - port_plus | int > 80
+    - name: stat out dir
+      stat:
+        path: "{{ out_dir }}/{{ inventory_hostname }}/site.conf"
+      register: st
+    - debug:
+        msg: "exists={{ st.stat.exists }}"
+    - name: ignore failure
+      command: "false"
+      ignore_errors: yes
+    - name: shell tagged
+      shell: echo tagged
+      tags: [special]
+      changed_when: false

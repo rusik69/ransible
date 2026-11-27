@@ -1,0 +1,3 @@
+packages: [git, curl]
+app_user: appsvc
+app_dir: /opt/myapp
