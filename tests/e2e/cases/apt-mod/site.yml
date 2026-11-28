@@ -1,0 +1,29 @@
+- name: apt module options
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - apt: {update_cache: true}
+    - apt: {update_cache: true, cache_valid_time: 3600}
+    - apt: {name: [tree, jq], state: present}
+    - apt: {name: [tree, jq], state: present}
+    - apt: {name: tree, state: latest}
+    - apt: {name: cowsay, state: present, install_recommends: false}
+    - apt: {name: cowsay, state: absent}
+    - apt: {name: cowsay, state: absent, purge: true}
+    - apt: {name: cowsay, state: absent, purge: true}
+    - apt: {name: not-a-real-package-xyz, state: present}
+      ignore_errors: true
+    - apt: {name: not-installed-xyz, only_upgrade: true}
+      ignore_errors: true
+    - apt: {name: "figlet", state: present}
+    - apt: {autoremove: true}
+    - apt: {autoclean: true}
+    - apt: {name: figlet, state: absent, autoremove: true}
+    - apt: {name: "lib*-dummy-none", state: absent}
+      ignore_errors: true
+    - apt: {name: "jq=99:no-such", state: present}
+      ignore_errors: true
+    - register: r
+      apt: {name: [tree], state: present, update_cache: true, cache_valid_time: 3600}
+    - debug: msg="cache_updated={{ r.cache_updated | default('n/a') }} changed={{ r.changed }}"

@@ -16,6 +16,9 @@ pub(super) fn detect_pkg(ctx: &Ctx) -> Result<String> {
 }
 
 pub(super) fn package(module: &str, a: &Args, ctx: &Ctx) -> Result<Res> {
+    if module == "apt" || (module == "package" && detect_pkg(ctx).is_ok_and(|m| m == "apt")) {
+        return apt(a, ctx);
+    }
     let mgr = match module {
         "apt" => "apt".to_string(),
         "yum" | "dnf" | "apk" => module.to_string(),
@@ -396,4 +399,477 @@ pub(super) fn apt_key(a: &Args, ctx: &Ctx) -> Result<Res> {
         return Ok(fail(o.stderr.trim().to_string()));
     }
     Ok(res(true))
+}
+
+/// `apt` with Ansible's option set, result keys and idempotence rules.
+pub(super) fn apt(a: &Args, ctx: &Ctx) -> Result<Res> {
+    let state = st(a, "state").unwrap_or_else(|| "present".into());
+    let names = if a.contains_key("name") {
+        list(a, "name")
+    } else {
+        list(a, "pkg")
+    };
+    let purge = bo(a, "purge", false);
+    let mut out = res(false);
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    let mut changed = false;
+    let mut ran = false; // a package-changing command ran
+    let apt_get = |ctx: &Ctx, args: &str| -> Result<crate::conn::Output> {
+        let mut cmd = String::from(
+            "DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
+        );
+        if !list(a, "dpkg_options").is_empty() {
+            cmd = format!(
+                "DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get -y {}",
+                list(a, "dpkg_options")
+                    .iter()
+                    .map(|o| format!("-o Dpkg::Options::={}", q(&format!("--{o}"))))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        if bo(a, "allow_unauthenticated", false) {
+            cmd += " --allow-unauthenticated";
+        }
+        if bo(a, "allow_downgrade", false) {
+            cmd += " --allow-downgrades";
+        }
+        if bo(a, "force", false) {
+            cmd += " --force-yes";
+        }
+        if let Some(r) = st(a, "default_release") {
+            cmd += &format!(" -t {}", q(&r));
+        }
+        if !bo(a, "install_recommends", true) {
+            cmd += " --no-install-recommends";
+        }
+        ctx.conn.exec(&format!("{cmd} {args}"))
+    };
+    let apt_failed = |cmd: &str, o: &crate::conn::Output, stdout: &str, stderr: &str| -> Res {
+        let mut r = fail(format!("'{cmd}' failed: {}", o.stderr.trim()));
+        r.insert("rc".into(), o.rc.into());
+        r.insert("stdout".into(), format!("{stdout}{}", o.stdout).into());
+        r.insert("stderr".into(), format!("{stderr}{}", o.stderr).into());
+        r
+    };
+    // --- cache
+    let want_cache = bo(a, "update_cache", false) || a.contains_key("cache_valid_time");
+    let stamp = "/var/lib/apt/periodic/update-success-stamp";
+    let mtime = |ctx: &Ctx| -> i64 {
+        ctx.conn
+            .exec(&format!(
+                "stat -c %Y {stamp} 2>/dev/null || stat -c %Y /var/lib/apt/lists 2>/dev/null || echo 0"
+            ))
+            .ok()
+            .and_then(|o| o.stdout.lines().next().and_then(|l| l.trim().parse().ok()))
+            .unwrap_or(0)
+    };
+    let mut cache_updated = false;
+    if bo(a, "update_cache", false) || a.contains_key("cache_valid_time") {
+        let valid = a
+            .get("cache_valid_time")
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(0);
+        let now: i64 = ctx
+            .conn
+            .exec("date +%s")?
+            .stdout
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        let fresh = valid > 0 && now - mtime(ctx) < valid;
+        let do_update = bo(a, "update_cache", false) && !fresh;
+        if do_update && !ctx.check {
+            let retries = a
+                .get("update_cache_retries")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(5)
+                .max(1);
+            let delay = a
+                .get("update_cache_retry_max_delay")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(12);
+            let mut last = None;
+            for i in 0..retries {
+                let o = ctx
+                    .conn
+                    .exec("DEBIAN_FRONTEND=noninteractive apt-get update")?;
+                if o.rc == 0 {
+                    last = None;
+                    break;
+                }
+                last = Some(o);
+                if i + 1 < retries {
+                    ctx.conn
+                        .exec(&format!("sleep {}", (1i64 << i).min(delay)))?;
+                }
+            }
+            if let Some(o) = last {
+                return Ok(fail(format!(
+                    "Failed to update apt cache: {}",
+                    o.stderr.trim()
+                )));
+            }
+            cache_updated = true;
+        } else if do_update {
+            cache_updated = true;
+        }
+    }
+    // --- upgrade
+    if let Some(up) = st(a, "upgrade").filter(|u| u != "no") {
+        let sub = match up.as_str() {
+            "full" | "dist" => "dist-upgrade",
+            _ => "upgrade",
+        };
+        let sim = ctx
+            .conn
+            .exec(&format!("apt-get -s {sub} 2>/dev/null | grep -c '^Inst '"))?;
+        if sim.stdout.trim().parse::<i64>().unwrap_or(0) > 0 {
+            changed = true;
+            if !ctx.check {
+                let o = apt_get(ctx, sub)?;
+                if o.rc != 0 {
+                    return Ok(apt_failed(sub, &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                ran = true;
+            }
+        }
+    }
+    // --- cleanup-only operations
+    for (flag, sim_cmd, run_cmd) in [
+        (
+            "autoremove",
+            "apt-get -s autoremove 2>/dev/null | grep -c '^Remv '",
+            "autoremove",
+        ),
+        (
+            "autoclean",
+            "apt-get -s autoclean 2>/dev/null | grep -c '^Del '",
+            "autoclean",
+        ),
+    ] {
+        if bo(a, flag, false) && !(flag == "autoremove" && state == "absent" && !names.is_empty()) {
+            let n = ctx
+                .conn
+                .exec(sim_cmd)?
+                .stdout
+                .trim()
+                .parse::<i64>()
+                .unwrap_or(0);
+            if n > 0 {
+                changed = true;
+            }
+            if !ctx.check {
+                let o = apt_get(
+                    ctx,
+                    &format!(
+                        "{run_cmd}{}",
+                        if purge && flag == "autoremove" {
+                            " --purge"
+                        } else {
+                            ""
+                        }
+                    ),
+                )?;
+                if o.rc != 0 {
+                    return Ok(apt_failed(run_cmd, &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                ran = true;
+            }
+        }
+    }
+    // --- .deb files
+    if let Some(deb) = st(a, "deb") {
+        let local = if deb.starts_with("http://") || deb.starts_with("https://") {
+            let tmp = "/tmp/ransible_apt_deb.deb";
+            if !ctx.check {
+                let o = ctx.conn.exec(&format!("curl -fsSL -o {tmp} {}", q(&deb)))?;
+                if o.rc != 0 {
+                    return Ok(fail(format!(
+                        "failed to download {deb}: {}",
+                        o.stderr.trim()
+                    )));
+                }
+            }
+            tmp.to_string()
+        } else {
+            deb.clone()
+        };
+        if !ctx.check {
+            let info = ctx.conn.exec(&format!(
+                "dpkg-deb -f {l} Package Version | tr '\\n' ' '",
+                l = q(&local)
+            ))?;
+            let mut it = info.stdout.split_whitespace();
+            let (pk, ver) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+            let have = ctx
+                .conn
+                .exec(&format!(
+                    "dpkg-query -W -f='${{Version}}' {} 2>/dev/null",
+                    q(pk)
+                ))?
+                .stdout;
+            if have.trim() != ver || ver.is_empty() {
+                let o = apt_get(ctx, &format!("install {}", q(&local)))?;
+                if o.rc != 0 {
+                    return Ok(apt_failed("install", &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                changed = true;
+                ran = true;
+            }
+        } else {
+            changed = true;
+        }
+    }
+    // --- package lists
+    let status_of = |p: &str| -> Result<(bool, bool, String)> {
+        // (installed, config-files only, version)
+        let o = ctx.conn.exec(&format!(
+            "dpkg-query -W -f='${{Status}}|${{Version}}' {} 2>/dev/null",
+            q(p)
+        ))?;
+        let t = o.stdout.trim();
+        let (s, v) = t.split_once('|').unwrap_or(("", ""));
+        Ok((
+            s.ends_with(" installed"),
+            s.ends_with(" config-files"),
+            v.to_string(),
+        ))
+    };
+    let expand = |p: &str| -> Result<Vec<String>> {
+        if p.contains('*') || p.contains('?') {
+            let o = ctx.conn.exec(&format!(
+                "dpkg-query -W -f='${{Package}}\\n' {} 2>/dev/null",
+                q(p)
+            ))?;
+            let v: Vec<String> = o.stdout.lines().map(|s| s.to_string()).collect();
+            if v.is_empty() {
+                bail!("No package(s) matching '{p}' available");
+            }
+            Ok(v)
+        } else {
+            Ok(vec![p.to_string()])
+        }
+    };
+    let mut to_install: Vec<String> = vec![];
+    let mut to_remove: Vec<String> = vec![];
+    if state == "build-dep" {
+        let o = ctx.conn.exec(&format!(
+            "apt-get -s build-dep {} 2>/dev/null | grep -c '^Inst '",
+            names.iter().map(|n| q(n)).collect::<Vec<_>>().join(" ")
+        ))?;
+        if o.stdout.trim().parse::<i64>().unwrap_or(0) > 0 {
+            changed = true;
+            if !ctx.check {
+                let o = apt_get(
+                    ctx,
+                    &format!(
+                        "build-dep {}",
+                        names.iter().map(|n| q(n)).collect::<Vec<_>>().join(" ")
+                    ),
+                )?;
+                if o.rc != 0 {
+                    return Ok(apt_failed("build-dep", &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                ran = true;
+            }
+        }
+    } else if state == "fixed" {
+        changed = true;
+        if !ctx.check {
+            let o = apt_get(ctx, "install -f")?;
+            if o.rc != 0 {
+                return Ok(apt_failed("install -f", &o, &stdout, &stderr));
+            }
+            stdout += &o.stdout;
+            stderr += &o.stderr;
+            ran = true;
+        }
+    } else {
+        for spec in names.iter().filter(|n| n.as_str() != "*") {
+            match state.as_str() {
+                "absent" | "removed" => {
+                    for p in expand(spec)? {
+                        let (inst, rc_only, _) = status_of(&p)?;
+                        if inst || (purge && rc_only) {
+                            to_remove.push(p);
+                        }
+                    }
+                }
+                _ => {
+                    let (pkg, ver) = match spec.split_once('=') {
+                        Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                        None => (spec.clone(), None),
+                    };
+                    for p in expand(&pkg)? {
+                        let (inst, _, have) = status_of(&p)?;
+                        if st(a, "only_upgrade").is_some() && bo(a, "only_upgrade", false) && !inst
+                        {
+                            // must still exist in the archive
+                            if ctx
+                                .conn
+                                .exec(&format!("apt-cache show {} >/dev/null 2>&1", q(&p)))?
+                                .rc
+                                != 0
+                            {
+                                return Ok(fail(format!("No package matching '{p}' is available")));
+                            }
+                            continue;
+                        }
+                        if !inst
+                            && ctx
+                                .conn
+                                .exec(&format!("apt-cache show {} >/dev/null 2>&1", q(&p)))?
+                                .rc
+                                != 0
+                        {
+                            return Ok(fail(format!("No package matching '{p}' is available")));
+                        }
+                        let ok_ver = match &ver {
+                            Some(v) => inst && glob_match(v, &have),
+                            None => inst,
+                        };
+                        if let Some(v) = &ver
+                            && !ok_ver
+                        {
+                            let m = ctx.conn.exec(&format!(
+                                "apt-cache madison {} 2>/dev/null | awk '{{print $3}}'",
+                                q(&p)
+                            ))?;
+                            if !m.stdout.lines().any(|c| glob_match(v, c.trim())) {
+                                let mut r = fail(format!(
+                                    "no available installation candidate for {p}={v}"
+                                ));
+                                r.insert("cache_updated".into(), cache_updated.into());
+                                r.insert("cache_update_time".into(), mtime(ctx).into());
+                                return Ok(r);
+                            }
+                        }
+                        let item = match &ver {
+                            Some(v) => format!("{p}={v}"),
+                            None => p.clone(),
+                        };
+                        if state == "latest" && inst && ver.is_none() {
+                            let sim = ctx.conn.exec(&format!(
+                                "apt-get -s install {} 2>/dev/null | grep -c '^Inst '",
+                                q(&p)
+                            ))?;
+                            if sim.stdout.trim().parse::<i64>().unwrap_or(0) > 0 {
+                                to_install.push(item);
+                            }
+                        } else if !ok_ver {
+                            to_install.push(item);
+                        }
+                    }
+                }
+            }
+        }
+        if !to_install.is_empty() {
+            changed = true;
+            if !ctx.check {
+                let args = format!(
+                    "{}install {}",
+                    if bo(a, "only_upgrade", false) {
+                        "--only-upgrade "
+                    } else {
+                        ""
+                    },
+                    to_install
+                        .iter()
+                        .map(|n| q(n))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                let o = apt_get(ctx, &args)?;
+                if o.rc != 0 {
+                    return Ok(apt_failed(&format!("apt-get {args}"), &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                ran = true;
+            }
+        }
+        if !to_remove.is_empty() {
+            changed = true;
+            if !ctx.check {
+                let args = format!(
+                    "{}{} {}",
+                    if purge { "purge" } else { "remove" },
+                    if bo(a, "autoremove", false) {
+                        " --auto-remove"
+                    } else {
+                        ""
+                    },
+                    to_remove.iter().map(|n| q(n)).collect::<Vec<_>>().join(" ")
+                );
+                let o = apt_get(ctx, &args)?;
+                if o.rc != 0 {
+                    return Ok(apt_failed(&format!("apt-get {args}"), &o, &stdout, &stderr));
+                }
+                stdout += &o.stdout;
+                stderr += &o.stderr;
+                ran = true;
+            }
+        } else if bo(a, "autoremove", false) && state == "absent" && !names.is_empty() {
+            let n = ctx
+                .conn
+                .exec("apt-get -s autoremove 2>/dev/null | grep -c '^Remv '")?
+                .stdout
+                .trim()
+                .parse::<i64>()
+                .unwrap_or(0);
+            if n > 0 {
+                changed = true;
+                if !ctx.check {
+                    let o = apt_get(ctx, "autoremove")?;
+                    if o.rc != 0 {
+                        return Ok(apt_failed("autoremove", &o, &stdout, &stderr));
+                    }
+                    stdout += &o.stdout;
+                    stderr += &o.stderr;
+                    ran = true;
+                }
+            }
+        }
+    }
+    out.insert("changed".into(), changed.into());
+    // Ansible reports the cache keys on every present/latest/update call, not on plain removals
+    let installing = !names.is_empty()
+        && !matches!(state.as_str(), "absent" | "removed" | "build-dep" | "fixed");
+    if want_cache || installing || st(a, "upgrade").is_some_and(|u| u != "no") {
+        out.insert("cache_updated".into(), cache_updated.into());
+        out.insert("cache_update_time".into(), mtime(ctx).into());
+    }
+    if ran {
+        out.insert("stdout".into(), stdout.clone().into());
+        out.insert("stdout_lines".into(), lines(&stdout));
+        out.insert("stderr".into(), stderr.clone().into());
+        out.insert("stderr_lines".into(), lines(&stderr));
+    }
+    Ok(out)
+}
+
+/// shell-style `*`/`?` match (apt version globs like `1.2*`).
+fn glob_match(pat: &str, s: &str) -> bool {
+    fn m(p: &[u8], s: &[u8]) -> bool {
+        match (p.first(), s.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => m(&p[1..], s) || (!s.is_empty() && m(p, &s[1..])),
+            (Some(b'?'), Some(_)) => m(&p[1..], &s[1..]),
+            (Some(a), Some(b)) if a == b => m(&p[1..], &s[1..]),
+            _ => false,
+        }
+    }
+    m(pat.as_bytes(), s.as_bytes())
 }
