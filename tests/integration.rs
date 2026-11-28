@@ -1,18 +1,50 @@
 use std::process::Command;
 
 fn run(args: &[&str], out: &str) -> (String, i32) {
+    use std::io::Read;
+    use std::process::Stdio;
     let _ = std::fs::remove_dir_all(out);
-    let o = Command::new(env!("CARGO_BIN_EXE_ransible"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ransible"))
         .args(args)
         .env("RANSIBLE_OUT", out)
         .env("NO_COLOR", "1")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    (
-        String::from_utf8_lossy(&o.stdout).into_owned(),
-        o.status.code().unwrap_or(-1),
-    )
+    // drain pipes on threads so a chatty child cannot block; a watchdog kills hangs instead of waiting for hours
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let t_out = std::thread::spawn(move || {
+        let mut b = String::new();
+        let _ = so.read_to_string(&mut b);
+        b
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut b = String::new();
+        let _ = se.read_to_string(&mut b);
+        b
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break Some(st);
+        }
+        if start.elapsed() > std::time::Duration::from_secs(120) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = t_out.join().unwrap_or_default();
+    let stderr = t_err.join().unwrap_or_default();
+    match status {
+        Some(st) => (stdout, st.code().unwrap_or(-1)),
+        None => panic!("ransible {args:?} hung >120s\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+    }
 }
 
 #[test]
