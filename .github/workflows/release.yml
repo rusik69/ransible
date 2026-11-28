@@ -25,7 +25,7 @@ jobs:
           - { os: windows-11-arm,   target: aarch64-pc-windows-msvc,     musl: false }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: "${{ matrix.target }}" }
       - uses: Swatinem/rust-cache@v2
