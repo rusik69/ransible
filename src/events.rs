@@ -157,7 +157,10 @@ impl ConsoleSink {
                     }
                     format!("{head} => {}", pretty4(&Value::Object(r)))
                 } else if self.verbose > 0 {
-                    format!("{head} => {}", compact(&obj))
+                    // `failed: false` is internal bookkeeping; Ansible's callback does not print it
+                    let mut shown = obj.clone();
+                    shown.remove("failed");
+                    format!("{head} => {}", compact(&shown))
                 } else {
                     head
                 }

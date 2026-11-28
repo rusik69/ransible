@@ -220,33 +220,111 @@ pub(super) fn service(a: &Args, ctx: &Ctx) -> Result<Res> {
     Ok(r)
 }
 
+/// `getent <db> <key>` split into passwd/group fields (None when missing).
+fn getent_rec(ctx: &Ctx, db: &str, key: &str) -> Result<Option<Vec<String>>> {
+    let o = ctx.conn.exec(&format!("getent {db} {}", q(key)))?;
+    if o.rc != 0 || o.stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        o.stdout.trim().split(':').map(|s| s.to_string()).collect(),
+    ))
+}
+
+fn num_or(v: &str) -> Value {
+    v.parse::<i64>()
+        .map(Value::from)
+        .unwrap_or(Value::String(v.into()))
+}
+
 pub(super) fn user(a: &Args, ctx: &Ctx) -> Result<Res> {
     let name = st(a, "name").ok_or_else(|| anyhow!("missing name"))?;
     let state = st(a, "state").unwrap_or_else(|| "present".into());
-    let exists = ctx.conn.exec(&format!("id -u {}", q(&name)))?.rc == 0;
     let n = q(&name);
-    let run = |cmd: String| -> Result<()> {
+    let pw = getent_rec(ctx, "passwd", &name)?;
+    let exists = pw.is_some();
+    let run = |cmd: String| -> Result<crate::conn::Output> {
         let o = ctx.conn.exec(&cmd)?;
-        if o.rc != 0 {
-            bail!("{cmd}: {}", o.stderr.trim());
-        }
-        Ok(())
+        Ok(o)
     };
+    let failed = |cmd: &str, o: &crate::conn::Output| -> Res {
+        let mut r = fail(format!("{cmd}: {}", o.stderr.trim()));
+        r.insert("name".into(), name.clone().into());
+        r.insert("rc".into(), o.rc.into());
+        r.insert("stderr".into(), o.stderr.clone().into());
+        r.insert("stdout".into(), o.stdout.clone().into());
+        r
+    };
+    let mut out = res(false);
+    out.insert("name".into(), name.clone().into());
     if state == "absent" {
-        if exists && !ctx.check {
-            run(format!(
-                "userdel {}{n}",
-                if bo(a, "remove", false) { "-r " } else { "" }
-            ))?;
+        out.insert("state".into(), "absent".into());
+        if exists {
+            out.insert("force".into(), bo(a, "force", false).into());
+            out.insert("remove".into(), bo(a, "remove", false).into());
+            if !ctx.check {
+                let cmd = format!(
+                    "userdel {}{}{n}",
+                    if bo(a, "force", false) { "-f " } else { "" },
+                    if bo(a, "remove", false) { "-r " } else { "" }
+                );
+                let o = run(cmd.clone())?;
+                if o.rc != 0 {
+                    return Ok(failed(&cmd, &o));
+                }
+                out.insert("stderr".into(), o.stderr.clone().into());
+                out.insert("stderr_lines".into(), lines(&o.stderr));
+            }
+            out.insert("changed".into(), true.into());
         }
-        return Ok(res(exists));
+        return Ok(out);
     }
+    let non_unique = bo(a, "non_unique", false);
+    let groups = list(a, "groups");
+    let append = bo(a, "append", false);
+    let system = bo(a, "system", false);
+    let create_home = bo(a, "create_home", true);
+    let move_home = bo(a, "move_home", false);
+    let expire_arg = |e: &str| -> Option<String> {
+        let secs: f64 = e.parse().ok()?;
+        if secs < 0.0 {
+            return Some("''".into());
+        }
+        let days = (secs / 86400.0).floor() as i64;
+        // civil-from-days (UTC)
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        Some(format!("{y:04}-{m:02}-{d:02}"))
+    };
+    // Ansible passes `!<hash>` when the account must be locked
+    let lock_pw = bo(a, "password_lock", false);
+    let pw_arg = |p: &str| -> String {
+        if lock_pw {
+            format!("!{p}")
+        } else {
+            p.to_string()
+        }
+    };
     let mut flags = String::new();
     if let Some(v) = st(a, "uid") {
         flags += &format!(" -u {}", q(&v));
+        if non_unique {
+            flags += " -o";
+        }
     }
     if let Some(v) = st(a, "group") {
         flags += &format!(" -g {}", q(&v));
+    }
+    if let Some(v) = st(a, "comment") {
+        flags += &format!(" -c {}", q(&v));
     }
     if let Some(v) = st(a, "shell") {
         flags += &format!(" -s {}", q(&v));
@@ -254,92 +332,352 @@ pub(super) fn user(a: &Args, ctx: &Ctx) -> Result<Res> {
     if let Some(v) = st(a, "home") {
         flags += &format!(" -d {}", q(&v));
     }
-    if let Some(v) = st(a, "comment") {
-        flags += &format!(" -c {}", q(&v));
-    }
-    if let Some(v) = st(a, "password") {
-        flags += &format!(" -p {}", q(&v));
-    }
-    let groups = list(a, "groups");
-    if !groups.is_empty() {
-        flags += &format!(
-            " {}-G {}",
-            if bo(a, "append", false) && exists {
-                "-a "
-            } else {
-                ""
-            },
-            q(&groups.join(","))
-        );
-    }
-    if !exists {
-        if !ctx.check {
-            if bo(a, "system", false) {
-                flags += " -r";
-            }
-            if bo(a, "create_home", true) {
-                flags += " -m";
-            }
-            run(format!("useradd{flags} {n}"))?;
-        }
-        return Ok(res(true));
-    }
-    // existing user: only modify when a requested attribute differs
-    let mut changed = false;
-    let info = ctx.conn.exec(&format!("getent passwd {n}"))?.stdout;
-    let f: Vec<&str> = info.trim().split(':').collect();
-    let differs = |idx: usize, want: Option<String>| {
-        want.map(|w| f.get(idx).map(|h| *h != w).unwrap_or(false))
-            .unwrap_or(false)
-    };
-    if f.len() >= 7
-        && (differs(2, st(a, "uid"))
-            || differs(6, st(a, "shell"))
-            || differs(5, st(a, "home"))
-            || differs(4, st(a, "comment")))
+    let gstr = groups.join(",");
+    if !groups.is_empty()
+        || a.get("groups")
+            .is_some_and(|v| v.is_array() || v.is_string())
     {
-        changed = true;
+        // handled per create/modify below
     }
-    if !groups.is_empty() {
-        let have = ctx.conn.exec(&format!("id -nG {n}"))?.stdout;
-        let have: Vec<&str> = have.split_whitespace().collect();
-        if !groups.iter().all(|g| have.contains(&g.as_str())) {
+    let mut changed = false;
+    let mut created = false;
+    if !exists {
+        changed = true;
+        created = true;
+        if !ctx.check {
+            let mut f = flags.clone();
+            if !groups.is_empty() {
+                f += &format!(" -G {}", q(&gstr));
+            }
+            if let Some(v) = st(a, "password") {
+                f += &format!(" -p {}", q(&pw_arg(&v)));
+            }
+            if let Some(e) = st(a, "expires").and_then(|e| expire_arg(&e)) {
+                f += &format!(" -e {e}");
+            }
+            if system {
+                f += " -r";
+            }
+            f += if create_home { " -m" } else { " -M" };
+            if let Some(v) = st(a, "skeleton")
+                && create_home
+            {
+                f += &format!(" -k {}", q(&v));
+            }
+            let cmd = format!("useradd{f} {n}");
+            let o = run(cmd.clone())?;
+            if o.rc != 0 {
+                return Ok(failed(&cmd, &o));
+            }
+            if bo(a, "password_lock", false) && st(a, "password").is_none() {
+                let o = run(format!("usermod -L {n}"))?;
+                if o.rc != 0 {
+                    return Ok(failed("usermod -L", &o));
+                }
+            }
+        }
+    } else {
+        let f = pw.clone().unwrap_or_default();
+        let mut mods = String::new();
+        let gid_of = |g: &str| -> Result<Option<String>> {
+            if g.chars().all(|c| c.is_ascii_digit()) {
+                return Ok(Some(g.to_string()));
+            }
+            Ok(getent_rec(ctx, "group", g)?.and_then(|v| v.get(2).cloned()))
+        };
+        if let Some(w) = st(a, "uid")
+            && f.get(2) != Some(&w)
+        {
+            mods += &format!(" -u {}{}", q(&w), if non_unique { " -o" } else { "" });
+        }
+        if let Some(w) = st(a, "group")
+            && let Some(gid) = gid_of(&w)?
+            && f.get(3) != Some(&gid)
+        {
+            mods += &format!(" -g {}", q(&w));
+        }
+        if let Some(w) = st(a, "comment")
+            && f.get(4) != Some(&w)
+        {
+            mods += &format!(" -c {}", q(&w));
+        }
+        if let Some(w) = st(a, "shell")
+            && f.get(6) != Some(&w)
+        {
+            mods += &format!(" -s {}", q(&w));
+        }
+        if let Some(w) = st(a, "home")
+            && f.get(5) != Some(&w)
+        {
+            mods += &format!(" {}-d {}", if move_home { "-m " } else { "" }, q(&w));
+        }
+        if a.get("groups").is_some() {
+            let have = ctx.conn.exec(&format!(
+                "id -nG {n} | tr ' ' '\\n' | grep -vx \"$(id -gn {n})\" | sort -u"
+            ))?;
+            let have: Vec<String> = have.stdout.lines().map(|s| s.to_string()).collect();
+            let want: Vec<&String> = groups.iter().collect();
+            let missing: Vec<&String> =
+                want.iter().filter(|g| !have.contains(g)).copied().collect();
+            let primary_gid = f.get(3).cloned().unwrap_or_default();
+            let want_non_primary: Vec<&String> = want
+                .iter()
+                .filter(|g| gid_of(g).ok().flatten().as_deref() != Some(primary_gid.as_str()))
+                .copied()
+                .collect();
+            if append {
+                if !missing.is_empty() {
+                    let mut all: Vec<String> = have.clone();
+                    all.extend(missing.iter().map(|s| s.to_string()));
+                    mods += &format!(" -G {}", q(&all.join(",")));
+                }
+            } else {
+                let extra = have.iter().any(|h| !want_non_primary.contains(&h));
+                let lacking = want_non_primary.iter().any(|w| !have.contains(w));
+                if extra || lacking {
+                    mods += &format!(" -G {}", q(&gstr));
+                }
+            }
+        }
+        let shadow = ctx
+            .conn
+            .exec(&format!("getent shadow {n}"))?
+            .stdout
+            .trim()
+            .split(':')
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        if let Some(w) = st(a, "password")
+            && st(a, "update_password").as_deref() != Some("on_create")
+            && shadow.get(1) != Some(&pw_arg(&w))
+        {
+            mods += &format!(" -p {}", q(&pw_arg(&w)));
+        }
+        if let Some(e) = st(a, "expires") {
+            let cur = shadow.get(7).cloned().unwrap_or_default();
+            let want_days = e.parse::<f64>().ok().map(|s| {
+                if s < 0.0 {
+                    String::new()
+                } else {
+                    ((s / 86400.0).floor() as i64).to_string()
+                }
+            });
+            if want_days.is_some_and(|w| w != cur)
+                && let Some(arg) = expire_arg(&e)
+            {
+                mods += &format!(" -e {arg}");
+            }
+        }
+        if !mods.is_empty() {
+            changed = true;
+            if !ctx.check {
+                let cmd = format!("usermod{mods} {n}");
+                let o = run(cmd.clone())?;
+                if o.rc != 0 {
+                    return Ok(failed(&cmd, &o));
+                }
+            }
+        }
+        if let Some(lock) = a
+            .get("password_lock")
+            .and_then(loose_bool)
+            .filter(|_| st(a, "password").is_none())
+        {
+            let locked = shadow.get(1).is_some_and(|h| h.starts_with('!'));
+            if lock != locked {
+                changed = true;
+                if !ctx.check {
+                    let o = run(format!("usermod {} {n}", if lock { "-L" } else { "-U" }))?;
+                    if o.rc != 0 {
+                        return Ok(failed("usermod", &o));
+                    }
+                }
+            }
+        }
+        // missing home directory
+        if create_home && !ctx.check {
+            let home = getent_rec(ctx, "passwd", &name)?
+                .and_then(|v| v.get(5).cloned())
+                .unwrap_or_default();
+            if !home.is_empty()
+                && ctx.conn.exec(&format!("test -d {}", q(&home)))?.rc != 0
+                && st(a, "home").is_none()
+            {
+                run(format!(
+                    "mkdir -p {h} && cp -rT /etc/skel {h} 2>/dev/null; chown -R {n}: {h} && chmod 0755 {h}",
+                    h = q(&home)
+                ))?;
+                changed = true;
+            }
+        }
+    }
+    // ssh key
+    let after = if ctx.check && !exists {
+        None
+    } else {
+        getent_rec(ctx, "passwd", &name)?
+    };
+    if bo(a, "generate_ssh_key", false)
+        && let Some(p) = &after
+    {
+        let home = p.get(5).cloned().unwrap_or_default();
+        let file = st(a, "ssh_key_file").unwrap_or_else(|| {
+            format!(
+                "{home}/.ssh/id_{}",
+                st(a, "ssh_key_type").unwrap_or_else(|| "rsa".into())
+            )
+        });
+        let file = if file.starts_with('/') {
+            file
+        } else {
+            format!("{home}/{file}")
+        };
+        let fq = q(&file);
+        let has = ctx.conn.exec(&format!("test -f {fq}"))?.rc == 0;
+        if !has && !ctx.check {
+            let bits = st(a, "ssh_key_bits").unwrap_or_else(|| "0".into());
+            let host = ctx.conn.exec("hostname")?.stdout.trim().to_string();
+            let comment =
+                st(a, "ssh_key_comment").unwrap_or_else(|| format!("ansible-generated on {host}"));
+            let mut cmd = format!(
+                "mkdir -p \"$(dirname {fq})\" && chown {n}: \"$(dirname {fq})\" && chmod 0700 \"$(dirname {fq})\" && ssh-keygen -q -t {} -C {} -N {} -f {fq}",
+                q(&st(a, "ssh_key_type").unwrap_or_else(|| "rsa".into())),
+                q(&comment),
+                q(&st(a, "ssh_key_passphrase").unwrap_or_default())
+            );
+            if bits != "0" {
+                cmd += &format!(" -b {}", q(&bits));
+            }
+            cmd += &format!(" && chown {n}: {fq} {fq}.pub");
+            let o = run(cmd.clone())?;
+            if o.rc != 0 {
+                return Ok(failed("ssh-keygen", &o));
+            }
+            changed = true;
+        } else if !has {
             changed = true;
         }
+        out.insert("ssh_key_file".into(), file.clone().into());
+        if let Ok(o) = ctx
+            .conn
+            .exec(&format!("ssh-keygen -l -f {fq}.pub 2>/dev/null"))
+            && o.rc == 0
+        {
+            out.insert("ssh_fingerprint".into(), o.stdout.trim().to_string().into());
+        }
+        if let Ok(o) = ctx.conn.exec(&format!("cat {fq}.pub 2>/dev/null"))
+            && o.rc == 0
+        {
+            out.insert("ssh_public_key".into(), o.stdout.trim().to_string().into());
+        }
     }
-    if changed && !ctx.check {
-        run(format!("usermod{flags} {n}"))?;
+    // result keys (what Ansible reports)
+    if let Some(p) = after {
+        out.insert(
+            "uid".into(),
+            num_or(p.get(2).map(String::as_str).unwrap_or("")),
+        );
+        out.insert(
+            "group".into(),
+            num_or(p.get(3).map(String::as_str).unwrap_or("")),
+        );
+        out.insert(
+            "comment".into(),
+            p.get(4).cloned().unwrap_or_default().into(),
+        );
+        out.insert("home".into(), p.get(5).cloned().unwrap_or_default().into());
+        out.insert("shell".into(), p.get(6).cloned().unwrap_or_default().into());
     }
-    Ok(res(changed))
+    out.insert("state".into(), "present".into());
+    if created {
+        out.insert("system".into(), system.into());
+        out.insert("create_home".into(), create_home.into());
+    } else {
+        out.insert("append".into(), append.into());
+        out.insert("move_home".into(), move_home.into());
+    }
+    out.insert("groups".into(), gstr.into());
+    if a.get("password").is_some() {
+        out.insert("password".into(), "NOT_LOGGING_PASSWORD".into());
+    }
+    out.insert("changed".into(), changed.into());
+    Ok(out)
 }
 
 pub(super) fn group(a: &Args, ctx: &Ctx) -> Result<Res> {
     let name = st(a, "name").ok_or_else(|| anyhow!("missing name"))?;
-    let exists = ctx.conn.exec(&format!("getent group {}", q(&name)))?.rc == 0;
     let absent = st(a, "state").as_deref() == Some("absent");
-    let cmd = if absent && exists {
-        Some(format!("groupdel {}", q(&name)))
-    } else if !absent && !exists {
-        let mut c = String::from("groupadd");
-        if let Some(g) = st(a, "gid") {
-            c += &format!(" -g {}", q(&g));
+    let cur = getent_rec(ctx, "group", &name)?;
+    let non_unique = bo(a, "non_unique", false);
+    let system = bo(a, "system", false);
+    let mut out = res(false);
+    out.insert("name".into(), name.clone().into());
+    out.insert(
+        "state".into(),
+        if absent { "absent" } else { "present" }.into(),
+    );
+    let mut cmd: Option<String> = None;
+    if absent {
+        if cur.is_some() {
+            cmd = Some(format!("groupdel {}", q(&name)));
         }
-        if bo(a, "system", false) {
-            c += " -r";
-        }
-        Some(format!("{c} {}", q(&name)))
     } else {
-        None
-    };
+        match &cur {
+            None => {
+                let mut c = String::from("groupadd");
+                if let Some(g) = st(a, "gid") {
+                    c += &format!(" -g {}", q(&g));
+                    if non_unique {
+                        c += " -o";
+                    }
+                }
+                if system {
+                    c += " -r";
+                }
+                cmd = Some(format!("{c} {}", q(&name)));
+            }
+            Some(f) => {
+                if let Some(g) = st(a, "gid")
+                    && f.get(2) != Some(&g)
+                {
+                    cmd = Some(format!(
+                        "groupmod -g {}{} {}",
+                        q(&g),
+                        if non_unique { " -o" } else { "" },
+                        q(&name)
+                    ));
+                }
+            }
+        }
+        out.insert("system".into(), system.into());
+    }
+    let changed = cmd.is_some();
     if let Some(c) = &cmd
         && !ctx.check
     {
         let o = ctx.conn.exec(c)?;
         if o.rc != 0 {
-            return Ok(fail(o.stderr.trim().to_string()));
+            let mut r = fail(format!(
+                "{}: {}",
+                c.split(' ').next().unwrap_or(""),
+                o.stderr.trim()
+            ));
+            r.insert("name".into(), name.into());
+            return Ok(r);
         }
     }
-    Ok(res(cmd.is_some()))
+    if !absent {
+        let gid = if ctx.check && cur.is_none() {
+            st(a, "gid")
+        } else {
+            getent_rec(ctx, "group", &name)?.and_then(|f| f.get(2).cloned())
+        };
+        if let Some(g) = gid {
+            out.insert("gid".into(), num_or(&g));
+        }
+    }
+    out.insert("changed".into(), changed.into());
+    Ok(out)
 }
 
 // ---------- network / vcs ----------

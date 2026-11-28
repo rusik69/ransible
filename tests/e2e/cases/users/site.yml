@@ -1,0 +1,33 @@
+- name: users and groups
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - group: {name: devs, gid: 2100}
+    - group: {name: ops, system: true}
+    - group: {name: devs2, gid: 2100, non_unique: true}
+    - group: {name: tmpgrp, state: present}
+    - group: {name: tmpgrp, state: absent}
+    - user:
+        name: alice
+        uid: 2001
+        group: devs
+        groups: [ops]
+        shell: /bin/sh
+        comment: "Alice A"
+        home: /srv/alice
+        create_home: true
+    - user: {name: alice, groups: [sudo], append: true}
+    - user: {name: bob, system: true, shell: /usr/sbin/nologin, create_home: false}
+    - user: {name: carol, password: "$6$salt$abcdefghijklmnopqrstuvwxyz0123456789", password_lock: true}
+    - user: {name: dave, expires: 1900000000, uid: 2004, non_unique: true}
+    - user: {name: erin, uid: 2005, generate_ssh_key: true, ssh_key_comment: erin@box, ssh_key_bits: 2048}
+    - user: {name: frank, groups: ops, append: false}
+    - user: {name: frank, groups: [], append: false}
+    - user: {name: gina, home: /srv/gina}
+    - user: {name: temp}
+    - user: {name: temp, state: absent, remove: true}
+    - user: {name: ghost, state: absent}
+    - register: r
+      user: {name: alice, comment: "Alice A"}
+    - debug: msg="alice unchanged={{ not r.changed }}"
