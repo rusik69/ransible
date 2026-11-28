@@ -366,7 +366,7 @@ pub(super) fn timezone(a: &Args, ctx: &Ctx) -> Result<Res> {
     let name = st(a, "name").ok_or_else(|| anyhow!("missing name"))?;
     if ctx
         .conn
-        .exec("command -v timedatectl >/dev/null && test -d /run/systemd/system")?
+        .exec("command -v timedatectl >/dev/null && timedatectl >/dev/null 2>&1")?
         .rc
         == 0
     {
