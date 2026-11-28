@@ -75,7 +75,7 @@ for c in "${cases[@]}"; do
       [ "$(field "$a" $f)" = "$(field "$r" $f)" ] || { ok=0; msgs+=" run$run:col$f-differs"; }
     done
   done
-  if ! diff -q "$WORK/$c.ansible.snap" "$WORK/$c.ransible.snap" >/dev/null; then ok=0; msgs+=" snapshot-differs"; fi
+  if ! diff -q "$WORK/$c.ansible.snap" "$WORK/$c.ransible.snap" >/dev/null; then ok=0; msgs+=" snapshot-differs"; diff "$WORK/$c.ansible.snap" "$WORK/$c.ransible.snap" | head -40 >&2; fi
   if [ $ok = 1 ]; then summary+=("PASS  $c"); else summary+=("FAIL  $c ($msgs )"); fail=1; fi
 done
 echo; printf '%s\n' "${summary[@]}"
