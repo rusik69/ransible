@@ -32,7 +32,18 @@ fn run(args: &[&str], out: &str) -> (String, i32) {
         if let Some(st) = child.try_wait().unwrap() {
             break Some(st);
         }
-        if start.elapsed() > std::time::Duration::from_secs(120) {
+        if start.elapsed() > std::time::Duration::from_secs(30) {
+            // diagnostics for CI hangs: process tree + per-thread kernel wait channel
+            let pid = child.id();
+            let diag = Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "ps -ef | tail -n 25; for t in /proc/{pid}/task/*; do echo $t $(cat $t/comm) $(cat $t/wchan 2>/dev/null) $(cat $t/stat | cut -d' ' -f3); done 2>&1; ls -l /proc/{pid}/fd 2>&1"
+                ))
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            eprintln!("HANG DIAG:\n{diag}");
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -43,7 +54,7 @@ fn run(args: &[&str], out: &str) -> (String, i32) {
     let stderr = t_err.join().unwrap_or_default();
     match status {
         Some(st) => (stdout, st.code().unwrap_or(-1)),
-        None => panic!("ransible {args:?} hung >120s\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+        None => panic!("ransible {args:?} hung >30s\nstdout:\n{stdout}\nstderr:\n{stderr}"),
     }
 }
 
