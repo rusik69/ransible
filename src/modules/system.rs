@@ -386,6 +386,12 @@ pub(super) fn timezone(a: &Args, ctx: &Ctx) -> Result<Res> {
             if o.rc != 0 {
                 return Ok(fail(o.stderr.trim().to_string()));
             }
+            // Debian's timedated records the name in /etc/timezone; make that deterministic
+            // (it is not always written before timedatectl returns)
+            ctx.conn.exec(&format!(
+                "test -f /etc/timezone && echo {} > /etc/timezone; true",
+                q(&name)
+            ))?;
         }
         return Ok(res(true));
     }
