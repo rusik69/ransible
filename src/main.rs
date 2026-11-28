@@ -295,11 +295,18 @@ fn contains_hostvars(dir: &Path, depth: usize) -> bool {
         if name.starts_with('.') || name == "target" {
             continue;
         }
-        if p.is_dir() {
+        // never follow symlinks or open FIFOs/sockets/devices (a blocking open hangs the whole run)
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
             if contains_hostvars(&p, depth + 1) {
                 return true;
             }
-        } else if let Ok(md) = p.metadata()
+        } else if ft.is_file()
+            && matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("yml" | "yaml" | "j2" | "json" | "ini" | "cfg" | "txt" | "conf" | "html")
+            )
+            && let Ok(md) = p.metadata()
             && md.len() < 1_000_000
             && std::fs::read_to_string(&p)
                 .map(|t| t.contains("hostvars"))

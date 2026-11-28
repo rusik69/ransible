@@ -259,7 +259,9 @@ fn linear_strategy_keeps_hosts_in_lockstep() {
     let src = std::fs::read_to_string("tests/fixtures/free.yml")
         .unwrap()
         .replace("  strategy: free\n", "");
-    let tmp = std::env::temp_dir().join("ransible-linear.yml");
+    let dir = std::env::temp_dir().join(format!("ransible-linear-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = dir.join("linear.yml");
     std::fs::write(&tmp, src).unwrap();
     let (stdout, code) = run(
         &[
