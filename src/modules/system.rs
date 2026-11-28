@@ -408,7 +408,7 @@ pub(super) fn timezone(a: &Args, ctx: &Ctx) -> Result<Res> {
         return Ok(res(false));
     }
     if !ctx.check {
-        let o = ctx.conn.exec(&format!("test -f /usr/share/zoneinfo/{n} && ln -sf /usr/share/zoneinfo/{n} /etc/localtime && readlink -f /etc/localtime | sed 's|.*/zoneinfo/||' > /etc/timezone", n = q(&name)))?;
+        let o = ctx.conn.exec(&format!("test -f /usr/share/zoneinfo/{n} && ln -sf /usr/share/zoneinfo/{n} /etc/localtime && echo {n} > /etc/timezone", n = q(&name)))?;
         if o.rc != 0 {
             return Ok(fail(format!("unknown timezone {name}")));
         }
