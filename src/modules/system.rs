@@ -389,23 +389,38 @@ pub(super) fn timezone(a: &Args, ctx: &Ctx) -> Result<Res> {
         }
         return Ok(res(true));
     }
-    let cur = ctx
-        .conn
-        .exec("readlink -f /etc/localtime | sed 's|.*/zoneinfo/||'")?
-        .stdout
-        .trim()
-        .to_string();
-    let want = ctx
-        .conn
-        .exec(&format!(
-            "readlink -f /usr/share/zoneinfo/{} | sed 's|.*/zoneinfo/||'",
-            q(&name)
-        ))?
-        .stdout
-        .trim()
-        .to_string();
-    if cur == name || (!want.is_empty() && cur == want) {
+    // Debian-style: /etc/timezone holds the literal name (Ansible compares it verbatim);
+    // otherwise fall back to the /etc/localtime symlink target.
+    let has_file = ctx.conn.exec("test -f /etc/timezone")?.rc == 0;
+    let cur = if has_file {
+        ctx.conn
+            .exec("cat /etc/timezone")?
+            .stdout
+            .trim()
+            .to_string()
+    } else {
+        ctx.conn
+            .exec("readlink -f /etc/localtime | sed 's|.*/zoneinfo/||'")?
+            .stdout
+            .trim()
+            .to_string()
+    };
+    if cur == name {
         return Ok(res(false));
+    }
+    if !has_file {
+        let want = ctx
+            .conn
+            .exec(&format!(
+                "readlink -f /usr/share/zoneinfo/{} | sed 's|.*/zoneinfo/||'",
+                q(&name)
+            ))?
+            .stdout
+            .trim()
+            .to_string();
+        if !want.is_empty() && cur == want {
+            return Ok(res(false));
+        }
     }
     if !ctx.check {
         let o = ctx.conn.exec(&format!("test -f /usr/share/zoneinfo/{n} && ln -sf /usr/share/zoneinfo/{n} /etc/localtime && echo {n} > /etc/timezone", n = q(&name)))?;
