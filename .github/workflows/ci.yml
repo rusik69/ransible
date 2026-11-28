@@ -83,4 +83,4 @@ jobs:
           sudo apt-get install -y -qq podman openssh-client rsync
           pipx install ansible-core
       - name: Run e2e (core cases)
-        run: tests/e2e/run.sh app git-pip nginx security-ntp apache redis postgresql
+        run: tests/e2e/run.sh app git-pip nginx security-ntp apache redis postgresql users
